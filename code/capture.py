@@ -58,6 +58,19 @@ def make_patterns(width=1920, height=1080, cell=16):
     return frames
 
 
+def make_dense_dots(width=1920, height=1080, dot_cell=8, seed=5):
+    """Lab5-style reproducible 20% random projector cells plus a color/QC frame."""
+    if min(width, height, dot_cell) < 1:
+        raise ValueError("Projector dimensions and dot cell size must be positive")
+    rng = np.random.default_rng(seed)
+    cells = rng.random((math.ceil(height / dot_cell),
+                        math.ceil(width / dot_cell))) < .20
+    dots = (np.repeat(np.repeat(cells, dot_cell, axis=0), dot_cell, axis=1)
+            [:height, :width] * 255).astype(np.uint8)
+    return [Pattern("dense_dots", dots),
+            Pattern("white", np.full((height, width), 255, np.uint8))]
+
+
 def reserve_view(root, object_id, session_id, view_id, repeat_id):
     for value in (object_id, session_id):
         if not SAFE.fullmatch(value):
@@ -359,6 +372,10 @@ def parser():
     p.add_argument("--settle-ms", type=int, default=250)
     p.add_argument("--timeout-ms", type=int, default=5000)
     p.add_argument("--cell-px", type=int, default=16)
+    p.add_argument("--scan-protocol", choices=("gray_phase", "dense_dots"),
+                   default="gray_phase")
+    p.add_argument("--dot-cell-px", type=int, default=8)
+    p.add_argument("--dot-seed", type=int, default=5)
     return p
 
 
@@ -379,7 +396,10 @@ def main(argv=None):
     display = select_projector_display(ds, args.display) if args.mode not in ("calibration", "color") else None
     if args.settle_ms < 1 or args.timeout_ms < 1 or args.exposure_us <= 0:
         raise ValueError("Timing and exposure must be positive")
-    patterns = make_patterns(cell=args.cell_px) if args.mode not in ("calibration", "color") else None
+    patterns = (make_dense_dots(dot_cell=args.dot_cell_px, seed=args.dot_seed)
+                if args.mode in ("scan", "projector-test") and args.scan_protocol == "dense_dots" else
+                make_patterns(cell=args.cell_px)
+                if args.mode not in ("calibration", "color") else None)
     if args.mode == "projector-test":
         cv2.namedWindow(PROJECTOR, cv2.WINDOW_NORMAL)
         try:
@@ -439,7 +459,7 @@ def main(argv=None):
                     index += 1
             return 0
         cv2.namedWindow(PROJECTOR, cv2.WINDOW_NORMAL)
-        black = patterns[-1]
+        black = Pattern("black", np.zeros_like(patterns[0].image))
         show_pattern(black, display)
         cv2.waitKey(args.settle_ms)
         print("Space starts one complete view; Q quits. Keep object and rig stationary.")
@@ -454,7 +474,11 @@ def main(argv=None):
             directory = reserve_view(args.output, args.object_id, args.session_id,
                                      args.view_id, args.repeat_id)
             metadata = {"created_at": datetime.now().astimezone().isoformat(),
-                "protocol": f"gray_phase_c{args.cell_px}_v1", "pattern_order": [p.name for p in patterns],
+                "protocol": ("dense_dots_v1" if args.scan_protocol == "dense_dots" else
+                             f"gray_phase_c{args.cell_px}_v1"),
+                "dot_cell_px": args.dot_cell_px if args.scan_protocol == "dense_dots" else None,
+                "dot_seed": args.dot_seed if args.scan_protocol == "dense_dots" else None,
+                "pattern_order": [p.name for p in patterns],
                 "pattern_sha256": {p.name: hashlib.sha256(p.image.tobytes()).hexdigest() for p in patterns},
                 "projector_size_px": [1920, 1080], "display": display, "camera_size_px": list(size),
                 "left_serial": args.left_serial, "right_serial": args.right_serial,

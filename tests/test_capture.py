@@ -9,10 +9,19 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
-from capture import make_patterns, reserve_view, save_pair, finish_scan, select_projector_display, parser, save_manual_pair, next_manual_index, configure_camera, record_capture_session
+from capture import make_patterns, make_dense_dots, reserve_view, save_pair, finish_scan, select_projector_display, parser, save_manual_pair, next_manual_index, configure_camera, record_capture_session
 
 
 class CaptureTests(unittest.TestCase):
+    def test_dense_dots_protocol_is_reproducible_and_has_white_frame(self):
+        a = make_dense_dots(80, 40, 8, 5)
+        b = make_dense_dots(80, 40, 8, 5)
+        self.assertEqual([p.name for p in a], ["dense_dots", "white"])
+        self.assertTrue(np.array_equal(a[0].image, b[0].image))
+        self.assertGreater(np.count_nonzero(a[0].image), 0)
+        self.assertEqual(parser().parse_args(["scan", "--scan-protocol", "dense_dots"]).scan_protocol,
+                         "dense_dots")
+
     def test_session_rejects_changed_camera_settings(self):
         class Node:
             def __init__(self, value): self.Value = value

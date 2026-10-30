@@ -4,10 +4,66 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
-from reconstruct_view import decode_axis, match_rows, q_for_scale
+from reconstruct_view import decode_axis, match_rows, q_for_scale, white_alignment_warnings, rectify_decoded, stereo_disparity, estimate_disparity_range
 
 
 class ReconstructionTests(unittest.TestCase):
+    def test_auto_range_uses_matched_scene_disparities(self):
+        rng = np.random.default_rng(5)
+        left = rng.integers(0, 2, (96, 256), dtype=np.uint8) * 255
+        right = np.zeros_like(left)
+        right[:, :-16] = left[:, 16:]
+        far, near, count = estimate_disparity_range(left, right)
+        self.assertGreater(count, 20)
+        self.assertLess(far, 16)
+        self.assertGreater(near, 16)
+        self.assertLess(near, 40)
+
+    def test_auto_range_requires_scene_features(self):
+        blank = np.zeros((96, 256), np.uint8)
+        with self.assertRaisesRegex(ValueError, "Cannot estimate disparity"):
+            estimate_disparity_range(blank, blank)
+
+    def test_dense_dots_sgbm_recovers_known_shift(self):
+        rng = np.random.default_rng(5)
+        left = rng.integers(0, 2, (96, 256), dtype=np.uint8) * 255
+        right = np.zeros_like(left)
+        right[:, :-16] = left[:, 16:]
+        disparity = stereo_disparity(left, right, 0, 64)
+        center = disparity[20:76, 80:180]
+        self.assertGreater(np.isfinite(center).mean(), .5)
+        self.assertAlmostEqual(float(np.nanmedian(center)), 16, delta=1)
+
+    def test_rectification_keeps_valid_points_next_to_invalid_region(self):
+        yy, xx = np.indices((5, 7), dtype=np.float32)
+        xy = np.stack((100 + xx, 200 + yy), axis=-1)
+        valid = np.ones((5, 7), bool)
+        valid[:, 3] = False
+        xy[~valid] = np.nan
+        mapped, mask = rectify_decoded(xy, valid, (xx, yy))
+        np.testing.assert_array_equal(mask, valid)
+        np.testing.assert_allclose(mapped[valid], xy[valid])
+        self.assertTrue(np.isnan(mapped[~valid]).all())
+
+    def test_rectification_rejects_real_projector_coordinate_jump(self):
+        yy, xx = np.indices((5, 7), dtype=np.float32)
+        xy = np.stack((100 + xx, 200 + yy), axis=-1)
+        xy[:, 3:, 0] += 16  # Gray cell address error between two valid regions.
+        _, mask = rectify_decoded(xy, np.ones((5, 7), bool), (xx, yy))
+        self.assertFalse(mask[:, 2:4].any())
+        self.assertTrue(mask[:, :2].all())
+        self.assertTrue(mask[:, 4:].all())
+
+    def test_large_white_epipolar_error_is_warning(self):
+        alignment = {"feature_matches": 22, "median_abs_epipolar_px": 16.67,
+                     "p95_abs_epipolar_px": 18.27}
+        warnings = white_alignment_warnings(alignment)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("16.67", warnings[0])
+        self.assertEqual(white_alignment_warnings({**alignment,
+            "median_abs_epipolar_px": 0.5}), [])
+        self.assertEqual(white_alignment_warnings(None), [])
+
     def test_gray_phase_unwraps_both_cells_and_fraction(self):
         width, height, cell = 32, 8, 8
         u = np.broadcast_to(np.arange(width)[None, :], (height, width))
