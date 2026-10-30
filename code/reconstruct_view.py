@@ -72,8 +72,8 @@ def white_alignment_warnings(alignment, threshold_px=3.0):
     return []
 
 
-def estimate_disparity_range(left, right):
-    """Estimate a scene-specific disparity search interval from rectified features."""
+def matched_disparities(left, right):
+    """Return reliable, epipolar-consistent disparities from one rectified pair."""
     if left.shape != right.shape:
         raise ValueError("Rectified stereo images must have equal dimensions")
     gray = [cv2.cvtColor(im, cv2.COLOR_BGR2GRAY) if im.ndim == 3 else im
@@ -81,7 +81,7 @@ def estimate_disparity_range(left, right):
     detector = cv2.SIFT_create(nfeatures=5000)
     keypoints, descriptors = zip(*(detector.detectAndCompute(im, None) for im in gray))
     if any(desc is None for desc in descriptors):
-        raise ValueError("Cannot estimate disparity: no image features; set both depth bounds manually")
+        return []
     matches = cv2.BFMatcher().knnMatch(descriptors[0], descriptors[1], k=2)
     disparities = []
     for pair in matches:
@@ -91,14 +91,24 @@ def estimate_disparity_range(left, right):
         disparity = a[0] - b[0]
         if abs(a[1]-b[1]) <= 3 and 0 < disparity < left.shape[1]:
             disparities.append(disparity)
+    return disparities
+
+
+def disparity_bounds_from_matches(disparities, width):
+    """Convert matches from one or several patterns to a scene search interval."""
     if len(disparities) < 15:
         raise ValueError(f"Cannot estimate disparity from only {len(disparities)} reliable matches; "
                          "set both --min-depth-mm and --max-depth-mm manually")
     low, high = np.percentile(disparities, (1, 99))
     padding = max(8, .20 * (high-low))
     far = max(1.0, float(np.floor(low-padding)))
-    near = min(float(left.shape[1]-1), float(np.ceil(high+padding)))
+    near = min(float(width-1), float(np.ceil(high+padding)))
     return far, near, len(disparities)
+
+
+def estimate_disparity_range(left, right):
+    """Estimate a scene-specific disparity search interval from one rectified pair."""
+    return disparity_bounds_from_matches(matched_disparities(left, right), left.shape[1])
 
 
 def stereo_disparity(left, right, min_disparity, num_disparities, block_size=5,
@@ -237,29 +247,34 @@ def main(argv=None):
     image_pair = None
     if args.min_depth_mm is None:
         estimated = []
+        pooled_matches = []
         for index, source in enumerate(dot_frames):
             pair = [cv2.remap(read_image(view / source[side], color=True),
                               *mapping, cv2.INTER_LINEAR)
                     for side, mapping in zip(("left", "right"), maps)]
             if index == 0:
                 image_pair = pair
-            try:
-                estimated.append(estimate_disparity_range(*pair))
-            except ValueError as exc:
-                print(f"[WARNING] {source['pattern']}: {exc}", flush=True)
-        if not estimated:
-            raise ValueError("No dot frame supplied enough matches to estimate depth; "
-                             "set both depth bounds manually")
+            matches = matched_disparities(*pair)
+            pooled_matches.extend(matches)
+            if len(matches) >= 15:
+                estimated.append(disparity_bounds_from_matches(matches, target[0]))
+            else:
+                print(f"[WARNING] {source['pattern']}: only {len(matches)} reliable feature matches; "
+                      "checking the combined scan", flush=True)
+        pooled_fallback = not estimated
+        if pooled_fallback:
+            estimated.append(disparity_bounds_from_matches(pooled_matches, target[0]))
+            print(f"Using {len(pooled_matches)} matches pooled across {len(dot_frames)} dot frames", flush=True)
         far = min(item[0] for item in estimated)
         near = max(item[1] for item in estimated)
-        auto_matches = sum(item[2] for item in estimated)
+        auto_matches = len(pooled_matches) if pooled_fallback else sum(item[2] for item in estimated)
         def depth_at(disparity):
             return float(q[2, 3] / (q[3, 2] * disparity + q[3, 3]))
         min_depth_mm, max_depth_mm = depth_at(near), depth_at(far)
         if not np.isfinite([min_depth_mm, max_depth_mm]).all() or not 0 < min_depth_mm < max_depth_mm:
             raise ValueError("Automatic depth range is invalid for this calibration; "
                              "set both depth bounds manually")
-        range_source = "auto_feature_matches"
+        range_source = "auto_pooled_feature_matches" if pooled_fallback else "auto_feature_matches"
         print(f"Auto disparity from {auto_matches} rectified matches: {far:.1f}..{near:.1f}px "
               f"(depth {min_depth_mm:.1f}..{max_depth_mm:.1f}mm)", flush=True)
     else:

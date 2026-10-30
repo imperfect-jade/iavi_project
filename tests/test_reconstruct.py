@@ -6,10 +6,20 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
-from reconstruct_view import load_run, q_for_scale, white_alignment_warnings, stereo_disparity, estimate_disparity_range, fuse_disparities
+from reconstruct_view import load_run, q_for_scale, white_alignment_warnings, stereo_disparity, estimate_disparity_range, fuse_disparities, disparity_bounds_from_matches
 
 
 class ReconstructionTests(unittest.TestCase):
+    def test_sparse_dot_frames_can_estimate_one_pooled_range(self):
+        frames = [[218.0, 219.0, 220.0] for _ in range(5)]
+        with self.assertRaisesRegex(ValueError, "only 3 reliable matches"):
+            disparity_bounds_from_matches(frames[0], 1296)
+        far, near, count = disparity_bounds_from_matches(
+            [d for frame in frames for d in frame], 1296)
+        self.assertEqual(count, 15)
+        self.assertLess(far, 218)
+        self.assertGreater(near, 220)
+
     def test_gray_phase_manifest_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, "manifest.json").write_text(json.dumps({
