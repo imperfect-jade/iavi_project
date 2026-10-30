@@ -1,6 +1,6 @@
 """Fit a relative right-to-left BGR color transform from paired chart photos.
 
-This is optional for point-cloud color; geometric Gray/phase decoding uses raw frames.
+This is optional for point-cloud color; geometric dense-dot matching uses raw frames.
 """
 from __future__ import annotations
 import argparse
@@ -135,7 +135,7 @@ def main(argv=None):
         "rejected_pairs": rejected, "per_pair": per_pair,
         "mean_absolute_error_before": float(np.mean(np.abs(right-left))),
         "mean_absolute_error_after": float(np.mean(np.abs(corrected-left))),
-        "note": "Relative camera match only; not absolute color accuracy. Apply to color output, not Gray/phase decoding."}
+        "note": "Relative camera match only; not absolute color accuracy. Apply to color output, not dense-dot matching."}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     previews = []
     for name in usable:

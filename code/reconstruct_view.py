@@ -1,6 +1,5 @@
-"""Reconstruct a stereo Gray/phase or dense-dots view in millimetres.
+"""Reconstruct a stereo dense-dots view in millimetres.
 
-Gray addresses unwrap both four-step phases; dense dots use SGBM correspondence.
 Metric geometry comes solely from calibrated stereo cameras.
 """
 from __future__ import annotations
@@ -9,24 +8,13 @@ import argparse
 import json
 import math
 from pathlib import Path
-import struct
 import sys
+import warnings
 
 import cv2
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def pattern_names(width, height, cell):
-    result = []
-    for axis, length in (("x", width), ("y", height)):
-        bits = (math.ceil(length/cell)-1).bit_length()
-        for bit in range(bits-1, -1, -1):
-            name = f"gray_{axis}_{bit:02d}"
-            result.extend((name, name+"_inv"))
-    result.extend(f"phase_{axis}_{step:02d}" for axis in ("x", "y") for step in range(4))
-    return result + ["white", "black"]
 
 
 def read_image(path, color=False):
@@ -35,67 +23,6 @@ def read_image(path, color=False):
     if image is None:
         raise ValueError(f"Cannot read {path}")
     return image
-
-
-def decode_axis(gray_pairs, phase_frames, cell, projector_length, contrast_min=10,
-                modulation_min=12):
-    """Return absolute projector coordinate, mask and modulation.
-
-    With I_k=a+b*cos(phi-k*pi/2), atan2(I1-I3,I0-I2) gives wrapped phi.
-    Gray bits identify the cell; adding phi/(2*pi) unwraps it.
-    """
-    shape = phase_frames[0].shape
-    code = np.zeros(shape, np.uint16)
-    valid = np.ones(shape, bool)
-    for positive, inverse in gray_pairs:
-        if positive.shape != shape or inverse.shape != shape:
-            raise ValueError("Gray frame shape mismatch")
-        difference = positive.astype(np.int16)-inverse.astype(np.int16)
-        valid &= np.abs(difference) > contrast_min
-        code = (code << 1) | (difference > 0).astype(np.uint16)
-    # Gray to binary via repeated XOR of shifted words.
-    cell_index = code.copy()
-    shift = 1
-    while shift < 16:
-        cell_index ^= cell_index >> shift
-        shift *= 2
-    c = phase_frames[0].astype(np.float32)-phase_frames[2].astype(np.float32)
-    s = phase_frames[1].astype(np.float32)-phase_frames[3].astype(np.float32)
-    modulation = .5*np.hypot(c, s)
-    fraction = np.mod(np.arctan2(s, c), 2*np.pi)/(2*np.pi)
-    coordinate = cell*(cell_index.astype(np.float32)+fraction.astype(np.float32))
-    valid &= (cell_index < math.ceil(projector_length/cell))
-    valid &= (modulation >= modulation_min) & (coordinate < projector_length)
-    coordinate[~valid] = np.nan
-    return coordinate, valid, modulation
-
-
-def decode_side(directory, rows, projector_size, cell, contrast_min, illumination_min,
-                modulation_min):
-    names = [row["pattern"] for row in rows]
-    def load(name):
-        return read_image(directory / rows[names.index(name)]["file"])
-    white, black = load("white"), load("black")
-    illumination = white.astype(np.int16)-black.astype(np.int16)
-    valid = illumination > illumination_min
-    coords, mods = [], []
-    for axis, length in (("x", projector_size[0]), ("y", projector_size[1])):
-        bits = (math.ceil(length/cell)-1).bit_length()
-        gray = [(load(f"gray_{axis}_{bit:02d}"),
-                 load(f"gray_{axis}_{bit:02d}_inv")) for bit in range(bits-1, -1, -1)]
-        phase = [load(f"phase_{axis}_{k:02d}") for k in range(4)]
-        if any(im.shape != white.shape for pair in gray for im in pair) or any(
-                im.shape != white.shape for im in phase):
-            raise ValueError("Camera frame dimensions differ")
-        coordinate, axis_valid, modulation = decode_axis(
-            gray, phase, cell, length, contrast_min, modulation_min)
-        coords.append(coordinate)
-        mods.append(modulation)
-        valid &= axis_valid
-        print(f"  {axis}: {np.count_nonzero(axis_valid):,} phase-unwrapped pixels", flush=True)
-    xy = np.stack(coords, axis=-1)
-    xy[~valid] = np.nan
-    return xy, valid, np.minimum(*mods), white
 
 
 def rectification_maps(calibration, scale):
@@ -109,63 +36,6 @@ def rectification_maps(calibration, scale):
             calibration[f"K_{side}"], calibration[f"D_{side}"],
             calibration[f"rectify_{side}"], projection, target, cv2.CV_32FC1))
     return maps, target
-
-
-def rectify_decoded(xy, valid, maps):
-    """Interpolate continuous values only where the complete source footprint is valid."""
-    mapped = cv2.remap(np.nan_to_num(xy, nan=0), *maps, cv2.INTER_LINEAR,
-                       borderMode=cv2.BORDER_CONSTANT)
-    footprint = cv2.remap(valid.astype(np.float32), *maps, cv2.INTER_LINEAR,
-                          borderMode=cv2.BORDER_CONSTANT)
-    mask = footprint > .999
-    # Reject interpolation over projector-coordinate jumps at Gray cell errors.
-    jump_x = np.max(np.abs(np.diff(mapped, axis=1)), axis=2)
-    jump_y = np.max(np.abs(np.diff(mapped, axis=0)), axis=2)
-    # Zero-filled invalid samples are not real projector coordinates. Only
-    # compare two valid footprints, using the same mask for both directions.
-    reject_x = (jump_x >= 12) & mask[:, 1:] & mask[:, :-1]
-    reject_y = (jump_y >= 12) & mask[1:, :] & mask[:-1, :]
-    mask[:, 1:] &= ~reject_x
-    mask[:, :-1] &= ~reject_x
-    mask[1:, :] &= ~reject_y
-    mask[:-1, :] &= ~reject_y
-    mapped[~mask] = np.nan
-    return mapped, mask
-
-
-def match_rows(left_xy, right_xy, min_disparity, max_disparity, tolerance):
-    """Integer pixel baseline: nearest 2D projector coordinate on same epipolar row."""
-    if left_xy.shape != right_xy.shape or left_xy.ndim != 3 or left_xy.shape[2] != 2:
-        raise ValueError("Rectified coordinates must have matching HxWx2 shape")
-    height, width = left_xy.shape[:2]
-    result = np.full((height, width), np.nan, np.float32)
-    offsets = np.arange(-5, 6)
-    for y in range(height):
-        lx = np.flatnonzero(np.isfinite(left_xy[y]).all(axis=1))
-        rx = np.flatnonzero(np.isfinite(right_xy[y]).all(axis=1))
-        if not len(lx) or not len(rx):
-            continue
-        order = np.argsort(right_xy[y, rx, 0], kind="stable")
-        rx = rx[order]
-        projected = right_xy[y, rx]
-        center = np.searchsorted(projected[:, 0], left_xy[y, lx, 0])
-        candidate = np.clip(center[:, None]+offsets, 0, len(rx)-1)
-        candidate_x = rx[candidate]
-        distance = np.linalg.norm(projected[candidate]-left_xy[y, lx, None], axis=2)
-        disparity = lx[:, None]-candidate_x
-        distance[(disparity < min_disparity) | (disparity > max_disparity)] = np.inf
-        best = np.argmin(distance, axis=1)
-        score = distance[np.arange(len(lx)), best]
-        keep = score <= tolerance
-        chosen_l, chosen_r, chosen_d, chosen_score = (lx[keep], candidate_x[np.arange(len(lx)), best][keep],
-            disparity[np.arange(len(lx)), best][keep], score[keep])
-        if not len(chosen_l):
-            continue
-        score_order = np.argsort(chosen_score, kind="stable")
-        _, first = np.unique(chosen_r[score_order], return_index=True)
-        unique = score_order[first]
-        result[y, chosen_l[unique]] = chosen_d[unique]
-    return result
 
 
 def q_for_scale(q, scale):
@@ -260,6 +130,21 @@ def stereo_disparity(left, right, min_disparity, num_disparities, block_size=5,
     return disparity
 
 
+def fuse_disparities(disparities, tolerance_px=1.5):
+    """Keep per-pixel median of mutually agreeing estimates; retain lone valid hits."""
+    if not disparities or any(d.shape != disparities[0].shape for d in disparities):
+        raise ValueError("Disparity maps must be nonempty and equally sized")
+    stack = np.stack(disparities).astype(np.float32)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        center = np.nanmedian(stack, axis=0)
+        inliers = np.where(np.abs(stack-center) <= tolerance_px, stack, np.nan)
+        fused = np.nanmedian(inliers, axis=0).astype(np.float32)
+    support = np.isfinite(inliers).sum(axis=0).astype(np.uint8)
+    fused[support == 0] = np.nan
+    return fused, support
+
+
 def write_ply(path, xyz, bgr, frame):
     points = np.asarray(xyz, np.float32).reshape(-1, 3)
     colors = np.asarray(bgr, np.uint8).reshape(-1, 3)
@@ -287,10 +172,12 @@ def load_run(directory, calibration):
         raise ValueError("Expected complete 1920x1080 scan")
     protocol = manifest["protocol"]
     if protocol == "dense_dots_v1":
-        cell, expected = None, ["dense_dots", "white"]
-    elif protocol.startswith("gray_phase_c") and protocol.endswith("_v1"):
-        cell = int(protocol[len("gray_phase_c"):-len("_v1")])
-        expected = pattern_names(*projector, cell)
+        expected = ["dense_dots", "white"]
+    elif protocol == "dense_dots_v2":
+        count = manifest.get("dot_frames")
+        if not isinstance(count, int) or not 1 <= count <= 32:
+            raise ValueError("Invalid dense-dot frame count")
+        expected = [f"dense_dots_{index:02d}" for index in range(count)] + ["white"]
     else:
         raise ValueError("Unsupported protocol")
     frames = manifest["frames"]
@@ -309,7 +196,7 @@ def load_run(directory, calibration):
             path = directory / row[side]
             if not path.is_file() or path.parent != directory / side:
                 raise ValueError(f"Missing/unsafe camera frame: {path}")
-    return manifest, frames, cell
+    return manifest, frames
 
 
 def main(argv=None):
@@ -320,10 +207,6 @@ def main(argv=None):
     p.add_argument("--scale", type=float, choices=(.5, 1.0), default=.5)
     p.add_argument("--min-depth-mm", type=float, help="manual lower depth bound; requires --max-depth-mm")
     p.add_argument("--max-depth-mm", type=float, help="manual upper depth bound; requires --min-depth-mm")
-    p.add_argument("--gray-contrast-min", type=int, default=10)
-    p.add_argument("--illumination-min", type=int, default=20)
-    p.add_argument("--modulation-min", type=float, default=12)
-    p.add_argument("--match-tolerance-px", type=float, default=1.5)
     p.add_argument("--point-stride", type=int, default=2)
     p.add_argument("--sgbm-block-size", type=int, default=5)
     args = p.parse_args(argv)
@@ -332,15 +215,13 @@ def main(argv=None):
     if (args.min_depth_mm is not None and
             (args.min_depth_mm <= 0 or args.max_depth_mm <= args.min_depth_mm)) or args.point_stride < 1:
         p.error("Depth range and point stride invalid")
-    if min(args.gray_contrast_min, args.illumination_min, args.modulation_min) < 0 or args.match_tolerance_px <= 0:
-        p.error("Invalid decoder/matcher thresholds")
     if args.sgbm_block_size < 3 or args.sgbm_block_size % 2 != 1:
         p.error("--sgbm-block-size must be odd and at least 3")
     with np.load(args.calibration) as archive:
         calibration = {key: archive[key].copy() for key in archive.files}
     metadata = json.loads(args.calibration.with_suffix(".json").read_text(encoding="utf-8"))
     calibration.update({"left_serial": metadata["left_serial"], "right_serial": metadata["right_serial"]})
-    manifest, frames, cell = load_run(args.view, calibration)
+    manifest, frames = load_run(args.view, calibration)
     view = args.view.resolve()
     if args.output:
         output = args.output
@@ -352,14 +233,26 @@ def main(argv=None):
     q = q_for_scale(calibration["Q"], args.scale)
     def disparity_at(z):
         return (q[2, 3]/z-q[3, 3])/q[3, 2]
-    dense = manifest["protocol"] == "dense_dots_v1"
+    dot_frames = frames[:-1]
     image_pair = None
     if args.min_depth_mm is None:
-        source = frames[0] if dense else frames[-2]
-        image_pair = [cv2.remap(read_image(view / source[side], color=True),
-                                *mapping, cv2.INTER_LINEAR)
-                      for side, mapping in zip(("left", "right"), maps)]
-        far, near, auto_matches = estimate_disparity_range(*image_pair)
+        estimated = []
+        for index, source in enumerate(dot_frames):
+            pair = [cv2.remap(read_image(view / source[side], color=True),
+                              *mapping, cv2.INTER_LINEAR)
+                    for side, mapping in zip(("left", "right"), maps)]
+            if index == 0:
+                image_pair = pair
+            try:
+                estimated.append(estimate_disparity_range(*pair))
+            except ValueError as exc:
+                print(f"[WARNING] {source['pattern']}: {exc}", flush=True)
+        if not estimated:
+            raise ValueError("No dot frame supplied enough matches to estimate depth; "
+                             "set both depth bounds manually")
+        far = min(item[0] for item in estimated)
+        near = max(item[1] for item in estimated)
+        auto_matches = sum(item[2] for item in estimated)
         def depth_at(disparity):
             return float(q[2, 3] / (q[3, 2] * disparity + q[3, 3]))
         min_depth_mm, max_depth_mm = depth_at(near), depth_at(far)
@@ -377,46 +270,28 @@ def main(argv=None):
     if not 0 <= far < near < target[0]:
         raise ValueError(f"Invalid disparity range from calibration/depth: {far:.1f}..{near:.1f}")
     print(f"Expected disparity: {far:.1f}..{near:.1f}px", flush=True)
-    decoded, rect = {}, {}
-    if dense:
-        if image_pair is None:
-            image_pair = [cv2.remap(read_image(view / frames[0][side], color=True),
-                                    *mapping, cv2.INTER_LINEAR)
-                          for side, mapping in zip(("left", "right"), maps)]
-        minimum = math.floor(far)
-        count = math.ceil((near-minimum+1)/16)*16
-        if count >= target[0]:
-            raise ValueError("SGBM disparity range exceeds image width; narrow depth range or increase scale")
-        disparity = stereo_disparity(
-            cv2.cvtColor(image_pair[0], cv2.COLOR_BGR2GRAY),
-            cv2.cvtColor(image_pair[1], cv2.COLOR_BGR2GRAY),
+    per_pattern_pixels = []
+    minimum = math.floor(far)
+    count = math.ceil((near-minimum+1)/16)*16
+    if count >= target[0]:
+        raise ValueError("SGBM disparity range exceeds image width; narrow depth range or increase scale")
+    estimates = []
+    for index, frame in enumerate(dot_frames):
+        pair = image_pair if index == 0 and image_pair is not None else [
+            cv2.remap(read_image(view / frame[side], color=True),
+                      *mapping, cv2.INTER_LINEAR)
+            for side, mapping in zip(("left", "right"), maps)]
+        one = stereo_disparity(
+            cv2.cvtColor(pair[0], cv2.COLOR_BGR2GRAY),
+            cv2.cvtColor(pair[1], cv2.COLOR_BGR2GRAY),
             minimum, count, args.sgbm_block_size)
-        disparity[(disparity < far) | (disparity > near)] = np.nan
-        color_frame = frames[1]
-        algorithm = "dense_dots_sgbm_lr_consistent"
-    else:
-        for side in ("left", "right"):
-            print(f"Decoding {side} with Gray-cell phase unwrapping...", flush=True)
-            rows = [{"pattern": row["pattern"], "file": row[side]} for row in frames]
-            xy, valid, modulation, white = decode_side(view, rows, (1920, 1080), cell,
-                args.gray_contrast_min, args.illumination_min, args.modulation_min)
-            decoded[side] = (xy, valid, modulation, white)
-            print(f"  jointly valid: {valid.sum():,}/{valid.size:,}", flush=True)
-        for side, mapping in zip(("left", "right"), maps):
-            xy, valid, _, _ = decoded[side]
-            rect[side] = rectify_decoded(xy, valid, mapping)
-            print(f"Rectified {side}: {rect[side][1].sum():,} valid pixels", flush=True)
-        disparity = match_rows(rect["left"][0], rect["right"][0], far, near,
-                               args.match_tolerance_px)
-        print(f"Forward stereo candidates: {np.isfinite(disparity).sum():,}", flush=True)
-        reverse = match_rows(rect["right"][0], rect["left"][0], -near, -far,
-                             args.match_tolerance_px)
-        yy, xx = np.nonzero(np.isfinite(disparity))
-        xr = np.rint(xx-disparity[yy, xx]).astype(int)
-        mutual = np.isfinite(reverse[yy, xr]) & (np.abs(reverse[yy, xr]+disparity[yy, xx]) <= 1)
-        disparity[yy[~mutual], xx[~mutual]] = np.nan
-        color_frame = frames[-2]
-        algorithm = "gray_phase_unwrap_integer_stereo_match"
+        one[(one < far) | (one > near)] = np.nan
+        per_pattern_pixels.append(int(np.isfinite(one).sum()))
+        estimates.append(one)
+        print(f"  {frame['pattern']}: {per_pattern_pixels[-1]:,} matched pixels", flush=True)
+    disparity, fusion_support = fuse_disparities(estimates)
+    color_frame = frames[-1]
+    algorithm = "dense_dots_sgbm_median_fusion" if len(dot_frames) > 1 else "dense_dots_sgbm_lr_consistent"
     white_views = [cv2.remap(read_image(view / color_frame[side]),
                              *mapping, cv2.INTER_LINEAR)
                    for side, mapping in zip(("left", "right"), maps)]
@@ -442,15 +317,12 @@ def main(argv=None):
     cloud = xyz[sampled]
     colors = white[sampled]
     if len(cloud) == 0:
-        raise ValueError("No valid 3D points; inspect decoding and depth range")
+        raise ValueError("No valid 3D points; inspect dot matching and depth range")
     left_cloud = (calibration["rectify_left"].T @ cloud.T).T
     write_ply(output / "cloud_rectified_left.ply", cloud, colors, "rectified_left_camera")
     write_ply(output / "cloud_left.ply", left_cloud, colors, "original_left_camera")
-    if not dense:
-        np.savez_compressed(output / "decoded_projector_xy.npz",
-            left=rect["left"][0], right=rect["right"][0],
-            left_valid=rect["left"][1], right_valid=rect["right"][1])
     np.save(output / "disparity_px.npy", disparity)
+    np.save(output / "fusion_support.npy", fusion_support)
     np.save(output / "depth_mm.npy", depth)
     cv2.imencode(".png", (valid.astype(np.uint8)*255))[1].tofile(output / "valid_mask.png")
     preview = cv2.applyColorMap(np.uint8(np.clip((max_depth_mm-np.nan_to_num(
@@ -462,11 +334,10 @@ def main(argv=None):
           "calibration": str(args.calibration.resolve()), "scale": args.scale,
           "algorithm": algorithm,
           "coordinate_frame": "rectified_left_camera", "unit": "mm",
-          "decoded_left_pixels": None if dense else int(decoded["left"][1].sum()),
-          "decoded_right_pixels": None if dense else int(decoded["right"][1].sum()),
-          "rectified_left_pixels": None if dense else int(rect["left"][1].sum()),
-          "rectified_right_pixels": None if dense else int(rect["right"][1].sum()),
           "matched_pixels": int(np.isfinite(disparity).sum()),
+          "dot_pattern_count": len(dot_frames),
+          "per_pattern_matched_pixels": per_pattern_pixels,
+          "fusion_support_at_least_two_pixels": int((fusion_support >= 2).sum()),
           "valid_depth_pixels": int(valid.sum()), "point_count": int(len(cloud)),
           "median_depth_mm": float(np.median(depth[valid])),
           "white_epipolar_diagnostic": alignment, "warnings": warnings,
@@ -474,11 +345,7 @@ def main(argv=None):
           "depth_range_source": range_source,
           "auto_range_feature_matches": auto_matches,
           "disparity_range_px": [far, near],
-          "thresholds": {"gray_contrast_min": args.gray_contrast_min,
-              "illumination_min": args.illumination_min,
-              "modulation_min": args.modulation_min,
-              "match_tolerance_px": args.match_tolerance_px,
-              "sgbm_block_size": args.sgbm_block_size if dense else None}}
+          "thresholds": {"sgbm_block_size": args.sgbm_block_size}}
     (output / "qc.json").write_text(json.dumps(qc, indent=2), encoding="utf-8")
     print(f"Reconstructed {len(cloud):,} points; median depth {qc['median_depth_mm']:.1f} mm")
     print(f"Outputs: {output.resolve()}")

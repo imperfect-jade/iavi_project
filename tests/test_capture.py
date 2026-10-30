@@ -2,25 +2,30 @@ import json
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
-from capture import make_patterns, make_dense_dots, reserve_view, save_pair, finish_scan, select_projector_display, parser, save_manual_pair, next_manual_index, configure_camera, record_capture_session
+from capture import make_dense_dots, reserve_view, save_pair, finish_scan, select_projector_display, parser, save_manual_pair, next_manual_index, configure_camera, record_capture_session
 
 
 class CaptureTests(unittest.TestCase):
     def test_dense_dots_protocol_is_reproducible_and_has_white_frame(self):
-        a = make_dense_dots(80, 40, 8, 5)
-        b = make_dense_dots(80, 40, 8, 5)
-        self.assertEqual([p.name for p in a], ["dense_dots", "white"])
+        a = make_dense_dots(80, 40, 8, 5, 3)
+        b = make_dense_dots(80, 40, 8, 5, 3)
+        self.assertEqual([p.name for p in a], ["dense_dots_00", "dense_dots_01", "dense_dots_02", "white"])
         self.assertTrue(np.array_equal(a[0].image, b[0].image))
+        self.assertFalse(np.array_equal(a[0].image, a[1].image))
         self.assertGreater(np.count_nonzero(a[0].image), 0)
         self.assertEqual(parser().parse_args(["scan", "--scan-protocol", "dense_dots"]).scan_protocol,
                          "dense_dots")
+        self.assertEqual(parser().parse_args(["scan", "--scan-protocol", "dense_dots"]).dot_frames, 5)
+        self.assertEqual(parser().parse_args(["scan"]).scan_protocol, "dense_dots")
+        with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+            parser().parse_args(["scan", "--scan-protocol", "gray_phase"])
 
     def test_session_rejects_changed_camera_settings(self):
         class Node:
@@ -112,14 +117,6 @@ class CaptureTests(unittest.TestCase):
         self.assertIs(select_projector_display([projector]), projector)
         with self.assertRaises(ValueError):
             select_projector_display([{**projector, "width": 1280}])
-
-    def test_protocol(self):
-        frames = make_patterns(1920, 1080, 16)
-        self.assertEqual(len(frames), 38)
-        self.assertEqual([x.name for x in frames[-2:]], ["white", "black"])
-        self.assertEqual(len({x.name for x in frames}), 38)
-        self.assertTrue(np.array_equal(frames[0].image + frames[1].image,
-                                       np.full((1080, 1920), 255, np.uint8)))
 
     def test_incomplete_scan_cannot_be_committed(self):
         with tempfile.TemporaryDirectory() as tmp:
