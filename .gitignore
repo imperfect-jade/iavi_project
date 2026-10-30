@@ -1,0 +1,30 @@
+# Camera captures and experiment outputs
+/raw/
+/processed/
+/calibration/
+
+# Generated training data and model runs
+/server/smoke_data/
+/server/datasets/
+/server/runs/
+/datasets/
+/runs/
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Temporary files and logs
+*.log
+*.tmp

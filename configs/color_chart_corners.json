@@ -1,0 +1,10 @@
+{
+  "description": "6x4 chart outer patch-grid corners in original 2592x1944 images; order TL, TR, BR, BL. Annotated for session_01/color_001.",
+  "pairs": [
+    {
+      "name": "color_001",
+      "left": [[949, 636], [1914, 634], [1915, 1197], [951, 1198]],
+      "right": [[622, 611], [1575, 593], [1579, 1158], [628, 1162]]
+    }
+  ]
+}
