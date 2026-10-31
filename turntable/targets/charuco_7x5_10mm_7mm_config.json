@@ -1,0 +1,16 @@
+{
+  "board_type": "ChArUco",
+  "dictionary": "DICT_4X4_50",
+  "squares_x": 7,
+  "squares_y": 5,
+  "square_length_mm": 10,
+  "marker_length_mm": 7,
+  "pattern_width_mm": 70,
+  "pattern_height_mm": 50,
+  "target_width_mm": 85,
+  "target_height_mm": 65,
+  "margin_mm_each_side": 7.5,
+  "png_dpi": 508,
+  "opencv_legacy_pattern": false,
+  "note": "7 x 5 means squares; interior ChArUco corners are 6 x 4."
+}

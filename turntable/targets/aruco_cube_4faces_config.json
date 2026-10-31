@@ -1,0 +1,239 @@
+{
+  "target_type": "four_face_aruco_cuboid",
+  "dictionary": "DICT_4X4_50",
+  "unit": "mm",
+  "frame": "cuboid_center_at_bottom; z_up; model face 0=-y, face 1=+x, face 2=+y, face 3=-x",
+  "mounted_face_to_model_face": [
+    0,
+    3,
+    2,
+    1
+  ],
+  "width_mm": 45.0,
+  "depth_mm": 45.0,
+  "height_mm": 100.0,
+  "marker_mm": 21.0,
+  "top_margin_mm": 26.0,
+  "bottom_margin_mm": 28.0,
+  "side_margin_mm": 12.0,
+  "marker_gap_mm": 4.0,
+  "markers": {
+    "20": {
+      "face": 0,
+      "row": 0,
+      "edge_mm": 21.0,
+      "corners_mm": [
+        [
+          -10.5,
+          -22.5,
+          74.0
+        ],
+        [
+          10.5,
+          -22.5,
+          74.0
+        ],
+        [
+          10.5,
+          -22.5,
+          53.0
+        ],
+        [
+          -10.5,
+          -22.5,
+          53.0
+        ]
+      ]
+    },
+    "21": {
+      "face": 0,
+      "row": 1,
+      "edge_mm": 21.0,
+      "corners_mm": [
+        [
+          -10.5,
+          -22.5,
+          49.0
+        ],
+        [
+          10.5,
+          -22.5,
+          49.0
+        ],
+        [
+          10.5,
+          -22.5,
+          28.0
+        ],
+        [
+          -10.5,
+          -22.5,
+          28.0
+        ]
+      ]
+    },
+    "22": {
+      "face": 1,
+      "row": 0,
+      "edge_mm": 21.0,
+      "corners_mm": [
+        [
+          -22.5,
+          10.5,
+          74.0
+        ],
+        [
+          -22.5,
+          -10.5,
+          74.0
+        ],
+        [
+          -22.5,
+          -10.5,
+          53.0
+        ],
+        [
+          -22.5,
+          10.5,
+          53.0
+        ]
+      ]
+    },
+    "23": {
+      "face": 1,
+      "row": 1,
+      "edge_mm": 21.0,
+      "corners_mm": [
+        [
+          -22.5,
+          10.5,
+          49.0
+        ],
+        [
+          -22.5,
+          -10.5,
+          49.0
+        ],
+        [
+          -22.5,
+          -10.5,
+          28.0
+        ],
+        [
+          -22.5,
+          10.5,
+          28.0
+        ]
+      ]
+    },
+    "24": {
+      "face": 2,
+      "row": 0,
+      "edge_mm": 21.0,
+      "corners_mm": [
+        [
+          10.5,
+          22.5,
+          74.0
+        ],
+        [
+          -10.5,
+          22.5,
+          74.0
+        ],
+        [
+          -10.5,
+          22.5,
+          53.0
+        ],
+        [
+          10.5,
+          22.5,
+          53.0
+        ]
+      ]
+    },
+    "25": {
+      "face": 2,
+      "row": 1,
+      "edge_mm": 21.0,
+      "corners_mm": [
+        [
+          10.5,
+          22.5,
+          49.0
+        ],
+        [
+          -10.5,
+          22.5,
+          49.0
+        ],
+        [
+          -10.5,
+          22.5,
+          28.0
+        ],
+        [
+          10.5,
+          22.5,
+          28.0
+        ]
+      ]
+    },
+    "26": {
+      "face": 3,
+      "row": 0,
+      "edge_mm": 21.0,
+      "corners_mm": [
+        [
+          22.5,
+          -10.5,
+          74.0
+        ],
+        [
+          22.5,
+          10.5,
+          74.0
+        ],
+        [
+          22.5,
+          10.5,
+          53.0
+        ],
+        [
+          22.5,
+          -10.5,
+          53.0
+        ]
+      ]
+    },
+    "27": {
+      "face": 3,
+      "row": 1,
+      "edge_mm": 21.0,
+      "corners_mm": [
+        [
+          22.5,
+          -10.5,
+          49.0
+        ],
+        [
+          22.5,
+          10.5,
+          49.0
+        ],
+        [
+          22.5,
+          10.5,
+          28.0
+        ],
+        [
+          22.5,
+          -10.5,
+          28.0
+        ]
+      ]
+    }
+  },
+  "measurement_note": "User-reported mounted dimensions: 45x45x100 mm cuboid, 21 mm black marker edge, 12 mm side margins, 26 mm top margin, 4 mm vertical gap, 28 mm bottom margin. Assumes all four faces share this placement and remain flat."
+}
