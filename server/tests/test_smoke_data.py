@@ -12,3 +12,9 @@ def test_smoke_splits_are_valid_and_disjoint(tmp_path):
     val = load_split(tmp_path / "val.npz", 32, 6)
     validate_disjoint_objects(train, val)
     assert train["points"].shape[0] > val["points"].shape[0]
+
+
+def test_default_smoke_action_count_is_24(tmp_path):
+    make_smoke_data(tmp_path, point_count=16)
+    train = load_split(tmp_path / "train.npz", 16, 24)
+    assert train["gain_target"].shape[1] == 24

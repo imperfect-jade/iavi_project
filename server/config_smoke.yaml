@@ -3,7 +3,7 @@ data:
   val: smoke_data/val.npz
 model:
   point_count: 2048
-  action_count: 36
+  action_count: 24
   center_mm: [0.0, 0.0, 0.0]
   scale_mm: 100.0
 training:
@@ -16,4 +16,4 @@ training:
 runtime:
   device: cuda:0
   num_workers: 0
-  output_dir: runs/smoke
+  output_dir: runs/smoke_24

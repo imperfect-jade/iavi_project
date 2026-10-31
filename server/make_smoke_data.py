@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 
 
-def make_smoke_data(output: str | Path, point_count: int = 2048, action_count: int = 36):
+def make_smoke_data(output: str | Path, point_count: int = 2048, action_count: int = 24):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(42)

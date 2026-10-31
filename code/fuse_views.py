@@ -58,6 +58,14 @@ def voxel_average(points, colors, voxel_mm):
     return xyz.astype(np.float32), np.rint(bgr).astype(np.uint8)
 
 
+def crop_cylinder(points, center, direction, radius_mm, height_mm):
+    offset = points - center
+    height = offset @ direction
+    radial = offset - height[:, None] * direction
+    return ((height >= height_mm[0]) & (height <= height_mm[1]) &
+            (np.einsum("ij,ij->i", radial, radial) <= radius_mm ** 2))
+
+
 def load_axis_calibration(path):
     """Read the measured axis in the original left-camera coordinate frame."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -85,13 +93,20 @@ def load_axis_calibration(path):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--view-root", type=Path, nargs="+", required=True,
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument("--session-root", type=Path,
+                        help="discover every view_*/repeat_* in one object session")
+    source.add_argument("--view-root", type=Path, nargs="+",
                    help="one or more raw/object/session/view_NNN directories")
     p.add_argument("--processed-root", type=Path, default=ROOT / "processed")
     p.add_argument("--output", type=Path, help="defaults to processed/fused/object/session/view_NNN")
-    p.add_argument("--bounds-mm", type=float, nargs=6, required=True,
+    p.add_argument("--bounds-mm", type=float, nargs=6,
                    metavar=("XMIN", "XMAX", "YMIN", "YMAX", "ZMIN", "ZMAX"),
-                   help="object-only crop in the original left camera frame")
+                   help="optional XYZ crop in the common reference frame, after camera-pose transform")
+    p.add_argument("--radius-mm", type=float, default=60,
+                   help="cylinder crop radius around calibrated axis (default 60 mm)")
+    p.add_argument("--height-mm", type=float, nargs=2, default=(-20, 110),
+                   metavar=("MIN", "MAX"), help="axis-coordinate crop in mm (default -20 110)")
     p.add_argument("--axis-point-mm", type=float, nargs=3,
                    help="measured turntable axis point in reference camera frame; default estimates center from crops")
     p.add_argument("--axis-calibration", type=Path,
@@ -112,17 +127,25 @@ def main(argv=None):
                       tuple(args.axis_direction) != (0, 1, 0)):
         p.error("--axis-calibration supplies the axis and angle sign; omit --axis-point-mm and --angle-sign")
     axis_cal = load_axis_calibration(axis_path) if axis_path else None
-    bounds = np.asarray(args.bounds_mm, np.float64).reshape(3, 2)
-    if np.any(bounds[:, 0] >= bounds[:, 1]) or args.voxel_mm <= 0 or not np.isfinite(bounds).all():
+    if not axis_cal and args.bounds_mm is None:
+        p.error("Manual-axis fusion requires --bounds-mm to remove static background")
+    bounds = np.asarray(args.bounds_mm, np.float64).reshape(3, 2) if args.bounds_mm else None
+    if (bounds is not None and (np.any(bounds[:, 0] >= bounds[:, 1]) or not np.isfinite(bounds).all())) or \
+       args.voxel_mm <= 0 or args.radius_mm <= 0 or args.height_mm[0] >= args.height_mm[1]:
         p.error("Invalid object bounds or voxel size")
     axis = axis_cal["direction"] if axis_cal else np.asarray(args.axis_direction, np.float64)
     if not np.isfinite(axis).all() or np.linalg.norm(axis) == 0:
         p.error("Axis direction must be finite and nonzero")
     poses = json.loads(args.camera_poses.read_text(encoding="utf-8")) if args.camera_poses else {}
-    roots = [path.resolve() for path in args.view_root]
+    roots = (sorted(args.session_root.resolve().glob("view_*")) if args.session_root
+             else [path.resolve() for path in args.view_root])
+    roots = [path for path in roots if path.is_dir()]
+    if not roots:
+        raise ValueError("No view directories found")
     if len({(root.parent.parent, root.parent) for root in roots}) != 1:
         raise ValueError("All view roots must belong to the same object and session")
-    default_name = roots[0].name + ("_axis_calibrated" if axis_cal else "")
+    default_name = "all_views_axis_calibrated" if args.session_root and axis_cal else (
+        "all_views" if args.session_root else roots[0].name + ("_axis_calibrated" if axis_cal else ""))
     output = args.output or ROOT / "processed" / "fused" / roots[0].parent.parent.name / roots[0].parent.name / default_name
     repeats = [(root, path) for root in roots for path in sorted(root.glob("repeat_*/pose.json"))]
     if len(repeats) < 2:
@@ -146,10 +169,6 @@ def main(argv=None):
         if b"comment coordinates original_left_camera; unit mm" not in header:
             raise ValueError(f"Expected original-left-camera cloud: {cloud_path}")
         xyz, bgr = read_ply(cloud_path)
-        keep = np.isfinite(xyz).all(axis=1) & np.all((xyz >= bounds[:, 0]) & (xyz <= bounds[:, 1]), axis=1)
-        xyz, bgr = xyz[keep], bgr[keep]
-        if not len(xyz):
-            raise ValueError(f"Object crop is empty: {name}")
         command_angle = float(pose["turntable_deg_commanded"])
         if axis_cal and command_angle not in axis_cal["angles_by_command"]:
             raise ValueError(f"No calibrated angle for {command_angle:g} deg: {name}")
@@ -185,13 +204,24 @@ def main(argv=None):
         axis_source = "user_supplied"
     if not np.isfinite(center).all():
         raise ValueError("Invalid axis point")
+    for row in scans:
+        xyz = row["xyz"]
+        keep = np.isfinite(xyz).all(axis=1)
+        if bounds is not None:
+            keep &= np.all((xyz >= bounds[:, 0]) & (xyz <= bounds[:, 1]), axis=1)
+        if axis_cal:
+            keep &= crop_cylinder(xyz, center, axis, args.radius_mm, args.height_mm)
+        row["xyz"], row["bgr"] = xyz[keep], row["bgr"][keep]
+        if not len(row["xyz"]):
+            raise ValueError(f"Object crop is empty: {row['name']}")
     output.mkdir(parents=True, exist_ok=True)
     (output / "aligned").mkdir(exist_ok=True)
+    output_frame = "turntable_zero_calibrated" if axis_cal else "turntable_zero_estimated"
     all_xyz, all_bgr, summary = [], [], []
     for row in scans:
         aligned = rotate_about_axis(row["xyz"], center, axis, -args.angle_sign * row["angle"])
         filename = row["name"].split("/")[-1] if len(roots) == 1 else row["name"].replace("/", "_")
-        write_ply(output / "aligned" / f"{filename}.ply", aligned, row["bgr"], "turntable_zero_estimated")
+        write_ply(output / "aligned" / f"{filename}.ply", aligned, row["bgr"], output_frame)
         all_xyz.append(aligned)
         all_bgr.append(row["bgr"])
         summary.append({"repeat": row["name"], "command_angle_deg": row["command_angle"],
@@ -199,14 +229,16 @@ def main(argv=None):
                         "cropped_points": len(aligned)})
         print(f"{row['name']}: {row['angle']:g} deg, {len(aligned):,} object points", flush=True)
     points, colors = voxel_average(np.concatenate(all_xyz), np.concatenate(all_bgr), args.voxel_mm)
-    write_ply(output / "fused.ply", points, colors, "turntable_zero_estimated")
-    report = {"coordinate_frame": "turntable_zero_estimated", "unit": "mm", "sources": [str(root) for root in roots],
+    write_ply(output / "fused.ply", points, colors, output_frame)
+    report = {"coordinate_frame": output_frame, "unit": "mm", "sources": [str(root) for root in roots],
               "axis_point_mm": center.tolist(), "axis_direction": (axis/np.linalg.norm(axis)).tolist(),
               "axis_source": axis_source, "axis_calibration": str(axis_path.resolve()) if axis_cal else None,
               "angle_source": "calibrated_command_lookup" if axis_cal else "commanded",
               "axis_fit_rms_mm": axis_cal["point_rms_mm"] if axis_cal else None,
               "axis_return_to_zero": axis_cal["return_to_zero"] if axis_cal else None,
               "angle_sign": args.angle_sign, "bounds_mm": args.bounds_mm,
+              "radius_mm": args.radius_mm if axis_cal else None,
+              "height_mm": args.height_mm if axis_cal else None,
               "voxel_mm": args.voxel_mm, "input_points": int(sum(len(x) for x in all_xyz)),
               "fused_points": len(points), "views": summary,
               "warning": ("Calibrated command-angle lookup is from a separate session; object-scan arrival and rig stability remain unverified."

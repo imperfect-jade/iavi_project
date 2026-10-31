@@ -58,18 +58,18 @@ def test_full_action_space_can_sample_200_states(tmp_path):
     objects = []
     for split, oid in (("train", "a"), ("val", "b")):
         views = []
-        for action in range(36):
+        for action in range(24):
             name = f"{oid}_{action}.npy"
             np.save(tmp_path / name, np.array([[action, 0, 0]], np.float32))
             views.append(name)
         objects.append({"object_id": oid, "split": split, "views": views})
     manifest = {"unit": "mm", "coordinate_frame": "object_at_turntable_zero",
-                "action_count": 36, "initial_views": [12, 18], "tolerance_mm": .1,
+                "action_count": 24, "initial_views": [0, 6], "tolerance_mm": .1,
                 "voxel_mm": .5, "point_count": 16, "reference_max_points": 100,
                 "states_per_object": 200, "seed": 42, "objects": objects}
     path = tmp_path / "manifest.json"
     path.write_text(json.dumps(manifest))
     build_dataset(path, tmp_path / "out")
-    train = load_split(tmp_path / "out/train.npz", 16, 36)
+    train = load_split(tmp_path / "out/train.npz", 16, 24)
     assert len(train["points"]) == 200
     assert len(np.unique(train["visited_mask"], axis=0)) == 200

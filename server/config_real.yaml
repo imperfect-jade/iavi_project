@@ -3,7 +3,7 @@ data:
   val: datasets/val.npz
 model:
   point_count: 2048
-  action_count: 36
+  action_count: 24
   center_mm: [0.0, 0.0, 0.0]  # replace with independently measured fixed workspace center
   scale_mm: 100.0             # replace with independently measured fixed workspace scale
 training:
@@ -16,4 +16,4 @@ training:
 runtime:
   device: cuda:0
   num_workers: 2
-  output_dir: runs/real_seed42
+  output_dir: runs/real_seed42_24

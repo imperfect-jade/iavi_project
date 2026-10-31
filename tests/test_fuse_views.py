@@ -6,11 +6,16 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
-from fuse_views import DEFAULT_AXIS_CALIBRATION, read_ply, rotate_about_axis, voxel_average, load_axis_calibration
+from fuse_views import DEFAULT_AXIS_CALIBRATION, read_ply, rotate_about_axis, voxel_average, load_axis_calibration, crop_cylinder
 from reconstruct_view import write_ply
 
 
 class FuseViewsTests(unittest.TestCase):
+    def test_cylinder_crop_excludes_background_and_platform(self):
+        points = np.array([[0, 0, 0], [40, 0, 0], [61, 0, 0], [0, -30, 0]])
+        keep = crop_cylinder(points, np.zeros(3), np.array([0, 1, 0]), 60, (-20, 110))
+        np.testing.assert_array_equal(keep, [True, True, False, False])
+
     def test_default_axis_path_is_the_calibration_directory(self):
         self.assertEqual(DEFAULT_AXIS_CALIBRATION,
             Path(__file__).resolve().parents[1] / "calibration/turntable_axis/axis_cube_01/axis_calibration.json")

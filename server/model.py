@@ -5,7 +5,7 @@ from torch import nn
 
 
 class GainPolicy(nn.Module):
-    def __init__(self, action_count: int = 36, center_mm=(0.0, 0.0, 0.0), scale_mm=100.0):
+    def __init__(self, action_count: int = 24, center_mm=(0.0, 0.0, 0.0), scale_mm=100.0):
         super().__init__()
         if scale_mm <= 0:
             raise ValueError("scale_mm must be positive")
