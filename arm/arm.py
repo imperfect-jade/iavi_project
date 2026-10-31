@@ -69,10 +69,19 @@ def open_controller(port: str) -> ArmController:
         import serial
     except ImportError as exc:
         raise RuntimeError("pyserial is missing; run: python -m pip install pyserial") from exc
+    connection = None
     try:
-        connection = serial.Serial(port=port, baudrate=BAUDRATE, timeout=0.5,
+        # Configure control lines before opening. Asserting DTR/RTS may reset
+        # Arduino-compatible controllers and replay a saved startup action.
+        connection = serial.Serial(port=None, baudrate=BAUDRATE, timeout=0.5,
                                    write_timeout=2)
+        connection.dtr = False
+        connection.rts = False
+        connection.port = port
+        connection.open()
     except serial.SerialException as exc:
+        if connection is not None:
+            connection.close()
         raise RuntimeError(f"Cannot open {port}; close Zide or another serial monitor: {exc}") from exc
     time.sleep(STARTUP_WAIT_S)  # Arduino may reset when USB serial opens.
     return ArmController(connection)
@@ -84,8 +93,12 @@ def main(argv=None) -> int:
     parser.add_argument("--pose", choices=POSE_TARGETS, help="Move once and exit; omit for interactive mode")
     parser.add_argument("--list", action="store_true", help="List the two frozen commands")
     parser.add_argument("--dry-run", action="store_true", help="Print a command without opening a port")
+    parser.add_argument("--connect-only", action="store_true", help="Open/close port without sending motion commands")
     parser.add_argument("--readback", action="store_true", help="Read six servo positions after each move")
     args = parser.parse_args(argv)
+
+    if args.connect_only and args.pose is not None:
+        parser.error("--connect-only cannot be combined with --pose")
 
     if args.list:
         for pose in POSE_TARGETS:
@@ -103,6 +116,9 @@ def main(argv=None) -> int:
     try:
         controller = open_controller(args.port)
         print(f"Connected to {args.port} at {BAUDRATE} baud. Camera arrival is unverified.")
+        if args.connect_only:
+            print("Connect-only check: no motion command sent.")
+            return 0
         if args.pose is None:
             print("Enter upper or lower; q to quit.")
         while True:

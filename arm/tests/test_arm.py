@@ -2,11 +2,13 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+import types
 
 ARM_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ARM_DIR))
 
-from arm import ArmController, command_for_pose, parse_position_reply
+from arm import ArmController, command_for_pose, main, open_controller, parse_position_reply
 
 
 class FakeSerial:
@@ -74,6 +76,33 @@ class ArmTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--port", result.stderr)
+
+    def test_open_port_keeps_dtr_and_rts_inactive(self):
+        calls = []
+
+        class Port:
+            def __init__(self, **kwargs):
+                calls.append(("construct", kwargs))
+                self.dtr = True
+                self.rts = True
+                self.port = None
+
+            def open(self):
+                calls.append(("open", self.port, self.dtr, self.rts))
+
+        fake_serial = types.SimpleNamespace(Serial=Port, SerialException=OSError)
+        with patch.dict(sys.modules, {"serial": fake_serial}), patch("arm.time.sleep"):
+            controller = open_controller("COM7")
+        self.assertEqual(calls[0][1]["port"], None)
+        self.assertEqual(calls[1], ("open", "COM7", False, False))
+        self.assertIsInstance(controller, ArmController)
+
+    def test_connect_only_sends_no_motion_command(self):
+        fake = FakeSerial()
+        fake.close = lambda: None
+        with patch("arm.open_controller", return_value=ArmController(fake)):
+            self.assertEqual(main(["--port", "COM7", "--connect-only"]), 0)
+        self.assertEqual(fake.writes, [])
 
 
 if __name__ == "__main__":
