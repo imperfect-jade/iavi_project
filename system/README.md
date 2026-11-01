@@ -6,7 +6,7 @@
 
 固定板的实测方格边长必须与 `arm/targets/charuco_7x5_10mm_7mm_config.json` 一致，且在整次扫描中固定不动。它只有 70×50 mm，通常位于画面一侧，因此这一步主要校正当前会话的双目失配；正式量测仍需用独立标定板覆盖物体工作区验证。确需跳过本步骤时可加 `--no-board-stereo-correction`，此时重建使用 `--stereo` 对应的原 NPZ。
 
-全部视角拍摄成功后，程序先关闭相机、机械臂和转台串口，再按视角顺序调用 `code/reconstruct_view.py`。每个结果写入 `processed/<object-id>/<session-id>/view_###/repeat_###/`，包含 `cloud_left.ply`、`qc.json` 和 `reconstruction_status.json`；会话级结果写入 `processed/<object-id>/<session-id>/reconstruction_summary.json`。重建失败不丢失原始照片，程序继续处理其余视角，最终以非零退出码报告失败；本阶段不做点云融合。
+全部视角拍摄成功后，程序向转台再次发送 0° 指令，默认等待 12 秒，再关闭相机、机械臂和转台串口，按视角顺序调用 `code/reconstruct_view.py`。结束回零命令记录在会话根目录的 `turntable_final_home.json`；串口发送和等待不等于实际到位反馈。每个结果写入 `processed/<object-id>/<session-id>/view_###/repeat_###/`，包含 `cloud_left.ply`、`qc.json` 和 `reconstruction_status.json`；会话级结果写入 `processed/<object-id>/<session-id>/reconstruction_summary.json`。重建失败不丢失原始照片，程序继续处理其余视角，最终以非零退出码报告失败；本阶段不做点云融合。
 
 从项目根目录运行：
 

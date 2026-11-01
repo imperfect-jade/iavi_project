@@ -7,10 +7,29 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import scan_session
-from scan_session import angles_for_range, pending_views, reconstruct_session
+from scan_session import angles_for_range, pending_views, reconstruct_session, return_turntable_home
 
 
 class SessionPlanTests(unittest.TestCase):
+    def test_final_home_sends_zero_and_records_unverified_arrival(self):
+        with tempfile.TemporaryDirectory() as td:
+            class Controller:
+                def __init__(self):
+                    self.angles = []
+
+                def move_to(self, angle):
+                    self.angles.append(angle)
+                    return b"#000P0500T2000!"
+
+            controller = Controller()
+            with patch("scan_session.time.sleep") as sleep:
+                return_turntable_home(controller, Path(td), 12.0)
+            self.assertEqual(controller.angles, [0])
+            sleep.assert_called_once_with(12.0)
+            record = json.loads((Path(td) / "turntable_final_home.json").read_text(encoding="utf-8"))
+            self.assertEqual(record["command_deg"], 0)
+            self.assertFalse(record["arrival_verified"])
+
     def test_range_and_view_ids(self):
         self.assertEqual(angles_for_range(60, 180, 60), [60, 120, 180])
         for values in [(0, 330, 45), (180, 0, 30), (0, 350, 30)]:

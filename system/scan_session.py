@@ -28,6 +28,18 @@ def angles_for_range(start: int, end: int, step: int) -> list[int]:
     return values
 
 
+def return_turntable_home(controller, session_root: Path, settle_s: float) -> None:
+    """Return to the tested zero command after all requested captures."""
+    command = controller.move_to(0)
+    sent_at = datetime.now().astimezone().isoformat()
+    print(f"Final turntable home: {command.decode('ascii')}; waiting {settle_s:g} s", flush=True)
+    time.sleep(settle_s)
+    record = {"command_deg": 0, "serial_command": command.decode("ascii"),
+              "sent_at": sent_at, "settle_s": settle_s, "arrival_verified": False}
+    (session_root / "turntable_final_home.json").write_text(
+        json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
 def pending_views(session_root: Path, angles: list[int], arm_pose_id: int,
                   repeat_id: int, resume: bool) -> list[int]:
     """Preflight every output before movement; never overwrite an incomplete view."""
@@ -215,7 +227,7 @@ def parser():
     p.add_argument("--settle-ms", type=int, default=250, help="Pattern stabilization time")
     p.add_argument("--motion-settle-s", type=float, default=SETTLE_WAIT_S)
     p.add_argument("--return-settle-s", type=float, default=12.0,
-                   help="Wait after 330-to-0 motion between arm poses")
+                   help="Wait for 0-degree return between poses and after final capture")
     p.add_argument("--dot-cell-px", type=int, default=8)
     p.add_argument("--dot-seed", type=int, default=5)
     p.add_argument("--dot-frames", type=int, default=5)
@@ -393,6 +405,7 @@ def main(argv=None) -> int:
                 _write_json(directory / "failure.json", {"error": str(exc),
                     "time": datetime.now().astimezone().isoformat()})
                 raise
+        return_turntable_home(controller, session_root, args.return_settle_s)
     finally:
         if controller is not None:
             controller.connection.close()
