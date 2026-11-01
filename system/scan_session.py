@@ -136,8 +136,8 @@ def load_reference(path: Path, board_config: dict, stereo_path: Path):
         raise ValueError("Fixed-board reference differs from board or stereo calibration")
     name = data["reference_capture"]
     row = next(item for item in data["observations"] if item["name"] == name)
-    if row["pose"] != "upper":
-        raise ValueError("Reference capture must be upper pose")
+    if row["pose"] != "lower":
+        raise ValueError("Reference capture must be lower pose")
     return np.asarray(row["T_left_from_board"], dtype=np.float64)
 
 

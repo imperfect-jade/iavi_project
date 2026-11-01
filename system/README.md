@@ -10,7 +10,7 @@
 python system\scan_session.py --port COM6 --arm-port COM7 --start-angle 0 --end-angle 330 --step-angle 30 --object-id object_001 --session-id session_01
 ```
 
-默认参考为 `calibration/arm_fixed_board/board_repeat_01/two_pose_calibration.json` 中第一张上位姿定位图。**固定板必须与该标定时保持同一位置**；若重新安装固定板，先重做两位姿标定，并用 `--reference-calibration` 指向新结果。相机内参使用 `calibration/stereo/stereo_calibration.json`。机械臂默认等待 6 秒，转台默认等待 2.5 秒，可用 `--arm-settle-s`、`--motion-settle-s` 调整；串口命令与等待均不证明实际到位。
+默认参考为 `calibration/arm_fixed_board/board_repeat_01/two_pose_calibration.json` 中第一张下位姿定位图。**固定板必须与该标定时保持同一位置**；若重新安装固定板，先重做两位姿标定，并用 `--reference-calibration` 指向新结果。相机内参使用 `calibration/stereo/stereo_calibration.json`。机械臂默认等待 6 秒，转台默认等待 2.5 秒，可用 `--arm-settle-s`、`--motion-settle-s` 调整；串口命令与等待均不证明实际到位。
 
 上位姿拍完 330° 后切换到下位姿并回到 0°，这一步单独默认等待 12 秒，可用 `--return-settle-s` 调整；其余转台角度仍使用 `--motion-settle-s`。若在定位图取帧时遇到相机 `The buffer was cancelled`，这是相机采集失败，不等同于转台未停稳；应同时检查相机 USB 连接、供电及 pylon 采集状态。已有不完整视角需用新的 `--repeat-id` 配合 `--resume` 续拍。
 
@@ -22,4 +22,4 @@ python system\scan_session.py --port COM6 --arm-port COM7 --start-angle 0 --end-
 python system\scan_session.py --port COM6 --arm-port COM7 --start-angle 0 --end-angle 330 --step-angle 30 --object-id object_001 --session-id session_01 --resume --reconstruction-min-depth-mm 550 --reconstruction-max-depth-mm 1100
 ```
 
-机械臂换位后，原有转台轴标定可能不在此参考相机坐标系中。跨上、下位姿融合前须将转台轴变换到同一参考系，或在参考上位姿重新标定转台轴；仅有 `camera_poses.json` 不足以保证轴坐标一致。
+本项目统一使用首次下位姿左相机作为定位与融合参考系。转台轴在相同的下位姿相机位置标定；融合时使用 `--axis-already-in-reference`。固定板、机械臂或相机位置改变后须重新核对这一关系。旧会话若保存上位姿参考矩阵，可运行 `python system\rebase_camera_poses.py --session raw\object_004\session_04`，从逐视角固定板定位结果重算下位姿矩阵并备份原文件。

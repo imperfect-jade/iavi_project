@@ -89,6 +89,7 @@ class FixedBoardTests(unittest.TestCase):
             self.assertAlmostEqual(result['summary']['upper']['max_return_translation_mm'], 0, places=2)
             self.assertGreater(result['summary']['lower']['max_reprojection_rms_px'], 0)
             self.assertEqual(len(result['observations']), 3)
+            self.assertEqual(result['reference_capture'], 'capture_001_lower')
 
 
 if __name__ == "__main__":

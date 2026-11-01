@@ -6,11 +6,24 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
-from fuse_views import DEFAULT_AXIS_CALIBRATION, read_ply, rotate_about_axis, voxel_average, load_axis_calibration, crop_cylinder
+from fuse_views import DEFAULT_AXIS_CALIBRATION, read_ply, rotate_about_axis, voxel_average, load_axis_calibration, crop_cylinder, transform_axis, validate_rigid_transform
 from reconstruct_view import write_ply
 
 
 class FuseViewsTests(unittest.TestCase):
+    def test_axis_transforms_from_calibration_camera_to_reference(self):
+        transform = np.eye(4)
+        transform[:3, 3] = [10, 20, 30]
+        point, direction = transform_axis([1, 2, 3], [0, 1, 0], transform)
+        np.testing.assert_allclose(point, [11, 22, 33])
+        np.testing.assert_allclose(direction, [0, 1, 0])
+
+    def test_rejects_nonrigid_camera_transform(self):
+        transform = np.eye(4)
+        transform[0, 0] = 2
+        with self.assertRaisesRegex(ValueError, "rigid"):
+            validate_rigid_transform(transform, "test")
+
     def test_cylinder_crop_excludes_background_and_platform(self):
         points = np.array([[0, 0, 0], [40, 0, 0], [61, 0, 0], [0, -30, 0]])
         keep = crop_cylinder(points, np.zeros(3), np.array([0, 1, 0]), 60, (-20, 110))

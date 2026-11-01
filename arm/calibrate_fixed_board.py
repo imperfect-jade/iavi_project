@@ -70,9 +70,9 @@ def calibrate(images, stereo_path=DEFAULT_STEREO, board_path=DEFAULT_BOARD,
         pose_matrices[row["name"]] = T
     if len(observations) < 2 or not {"upper", "lower"}.issubset({r["pose"] for r in observations}):
         raise ValueError("Need images from both arm poses")
-    reference = next((r for r in observations if r["pose"] == "upper"), None)
+    reference = next((r for r in observations if r["pose"] == "lower"), None)
     if reference is None:
-        raise ValueError("Missing upper reference pose")
+        raise ValueError("Missing lower reference pose")
     T_ref = pose_matrices[reference["name"]]
     first_by_pose = {}
     for row in observations:
@@ -98,7 +98,7 @@ def calibrate(images, stereo_path=DEFAULT_STEREO, board_path=DEFAULT_BOARD,
             "board": config, "stereo_calibration": str(stereo_path.resolve()),
             "source_capture_manifest": str((images / "capture_manifest.json").resolve()),
             "summary": summary, "observations": observations,
-            "axis_note": "Existing turntable axis may belong to another left-camera frame; recalibrate axis at upper pose or measure the frame transform before fusion.",
+            "axis_note": "Turntable axis is measured at the lower camera pose; verify that this reference capture uses the same camera position before fusion.",
             "fusion_note": "These matrices are keyed by board capture names, not scan view_###/repeat_### names. Localize every scan arrival or verify repeatability before building fuse_views --camera-poses."}
 
 

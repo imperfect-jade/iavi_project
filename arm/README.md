@@ -68,6 +68,6 @@ python arm\capture_fixed_board.py --session-id board_repeat_01 --port COM7 --rep
 python arm\calibrate_fixed_board.py --images raw\arm_fixed_board\board_repeat_01
 ```
 
-程序使用已有 `calibration/stereo/stereo_calibration.json` 中**原始左相机**的 `K_left` 和 `D_left`，重新检测每张左图，用 PnP 求 `T_left_from_board`，再以第一张上位姿左相机为参考计算 `T_reference_from_left`。单位为 mm；结果保存在 `calibration/arm_fixed_board/board_repeat_01/two_pose_calibration.json`。程序核对左右相机序列号、图像尺寸、板参数；默认至少 12 个角点且单张重投影 RMS 不超过 3 px，不满足就报错，不能把错误结果悄悄用于融合。输出包含每张图的角点数、重投影误差、变换矩阵和相同姿态首次到位后的平移/旋转回位误差。试拍也可以用同样的标定命令处理。
+程序使用已有 `calibration/stereo/stereo_calibration.json` 中**原始左相机**的 `K_left` 和 `D_left`，重新检测每张左图，用 PnP 求 `T_left_from_board`，再以第一张下位姿左相机为参考计算 `T_reference_from_left`。单位为 mm；结果保存在 `calibration/arm_fixed_board/board_repeat_01/two_pose_calibration.json`。程序核对左右相机序列号、图像尺寸、板参数；默认至少 12 个角点且单张重投影 RMS 不超过 3 px，不满足就报错，不能把错误结果悄悄用于融合。输出包含每张图的角点数、重投影误差、变换矩阵和相同姿态首次到位后的平移/旋转回位误差。试拍也可以用同样的标定命令处理。
 
-板的位姿应跨所有拍摄保持不变。若同一姿态回位误差对目标重建精度不可接受，正式扫描时每次到位后都应拍板重新定位。当前 JSON 的键是**标定拍摄**名称，不能直接作为 `fuse_views.py --camera-poses` 的 `view_###/repeat_###` 映射。原有转台轴 JSON 也属于其标定时的左相机坐标系；除非它与新的上位姿相同，否则需要在上位姿重新标定转台轴，或测得两个左相机坐标系间的变换。
+板的位姿应跨所有拍摄保持不变。若同一姿态回位误差对目标重建精度不可接受，正式扫描时每次到位后都应拍板重新定位。当前 JSON 的键是**标定拍摄**名称，不能直接作为 `fuse_views.py --camera-poses` 的 `view_###/repeat_###` 映射。本项目的转台轴在相同下位姿相机位置标定，固定板标定与新采集统一采用首次下位姿左相机参考系。
