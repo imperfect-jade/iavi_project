@@ -13,7 +13,7 @@ from fixed_board import (board_from_config, detect_corners_with_contrast_fallbac
                          relative_transform, transform_delta)
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_BOARD = ROOT / "turntable/targets/charuco_7x5_10mm_7mm_config.json"
+DEFAULT_BOARD = ROOT / "arm/targets/charuco_7x5_10mm_7mm_config.json"
 DEFAULT_STEREO = ROOT / "calibration/stereo/stereo_calibration.json"
 
 

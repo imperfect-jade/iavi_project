@@ -1,4 +1,4 @@
-"""Generate the 7 x 5 ChArUco turntable target at exact print dimensions."""
+"""Generate the 7 x 5 ChArUco fixed arm-pose target at exact print dimensions."""
 from pathlib import Path
 import json
 

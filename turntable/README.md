@@ -1,6 +1,6 @@
 # 转台程序使用说明
 
-旧版单面 ChArUco 标定板及其配置保存在 `turntable/targets/charuco_7x5_10mm_7mm_*`，生成脚本为 `turntable/generate_charuco_board.py`。它只用于复现早期实验；下面的整周转台轴标定使用四面 ArUco 方柱。
+单面 ChArUco 固定板及其生成脚本现存放在 `arm/targets/` 和 `arm/generate_charuco_board.py`，用于机械臂两位姿定位。下面的整周转台轴标定使用四面 ArUco 方柱。
 
 ## 四面 ArUco 方柱转台轴标定
 
@@ -16,6 +16,8 @@
 python turntable\capture_axis.py --port COM6 --session-id axis_cube_01
 python turntable\calibrate_axis.py --images raw\turntable_axis\axis_cube_01
 ```
+
+常规角度默认等待 2.5 秒，最后从 330° 返回 0° 的 `angle_000_return` 单独等待 12 秒。若实测回零还未停稳，可在新拍摄会话中增加 `--return-settle-s 20`；`--settle-s` 只调整常规角度。实际等待秒数记录在 `capture_manifest.json` 的每个角度条目中。等待时间仍不等于到位反馈，拍摄时请观察回零是否完全停止。
 
 原始照片和 `capture_manifest.json` 写入 `raw/turntable_axis/<session-id>/`，已存在会话不会覆盖。标定结果默认写入 `calibration/turntable_axis/<session-id>/axis_calibration.json`；可用 `--output` 指定其他结果文件。标定使用左右相机原图和现有双目内外参，对共同可见的标记角点进行三角化，再把其三维位置与同一方柱模型刚性配准，拟合转轴和实际角度。结果输出轴点、轴方向、逐图双目重投影误差、三维配准残差、转轴拟合残差，以及回零图像的角点位移和位姿差。单面近正视时，位姿角度可能仍不稳定；应结合回零图像的角点位移判断。轴点在原始左相机坐标系中，单位毫米。观察结果与实物相符后才能用于点云融合；不同机械臂位姿需分别标定或转换到共同坐标系。
 

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scan_session import angles_for_range, pending_views
+from scan_session import angles_for_range, pending_views, reconstruct_session
 
 
 class SessionPlanTests(unittest.TestCase):
@@ -22,6 +22,9 @@ class SessionPlanTests(unittest.TestCase):
             done.mkdir(parents=True)
             (done / "left.png").write_bytes(b"left")
             (done / "right.png").write_bytes(b"right")
+            (done / "localization").mkdir()
+            (done / "localization" / "left.png").write_bytes(b"board")
+            (done / "localization.json").write_text("{}", encoding="utf-8")
             (done / "manifest.json").write_text(json.dumps({
                 "complete": True, "view_id": 14, "arm_pose_id": 1,
                 "turntable_deg_commanded": 60, "protocol": "dense_dots_v2",
@@ -33,6 +36,48 @@ class SessionPlanTests(unittest.TestCase):
             bad.mkdir(parents=True)
             with self.assertRaises(FileExistsError):
                 pending_views(root, [90], 1, 1, True)
+
+    def test_reconstructs_each_complete_view_and_resumes_failed_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            raw = root / "raw" / "object" / "session"
+            processed = root / "processed" / "object" / "session"
+            calibration = root / "stereo.npz"
+            calibration.write_bytes(b"calibration")
+            for view_id, pose_id in ((0, 0), (12, 1)):
+                folder = raw / f"view_{view_id:03d}" / "repeat_001"
+                folder.mkdir(parents=True)
+                (folder / "left.png").write_bytes(b"image")
+                (folder / "right.png").write_bytes(b"image")
+                (folder / "localization").mkdir()
+                (folder / "localization" / "left.png").write_bytes(b"board")
+                (folder / "localization.json").write_text("{}", encoding="utf-8")
+                (folder / "manifest.json").write_text(json.dumps({
+                    "complete": True, "view_id": view_id, "arm_pose_id": pose_id,
+                    "turntable_deg_commanded": 0, "protocol": "dense_dots_v2",
+                    "frame_count": 1, "frames": [{"left": "left.png", "right": "right.png"}]}), encoding="utf-8")
+            calls = []
+
+            def fake_reconstruct(argv):
+                view = Path(argv[argv.index("--view") + 1])
+                output = Path(argv[argv.index("--output") + 1])
+                calls.append(view.parent.name)
+                if view.parent.name == "view_012" and calls.count("view_012") == 1:
+                    raise ValueError("no reliable matches")
+                output.mkdir(parents=True, exist_ok=True)
+                (output / "cloud_left.ply").write_bytes(b"ply")
+                (output / "qc.json").write_text(json.dumps({"point_count": 10, "warnings": []}), encoding="utf-8")
+                return 0
+
+            self.assertEqual(reconstruct_session(raw, processed, [0, 1], [0], calibration,
+                                                 fake_reconstruct), 1)
+            self.assertEqual(calls, ["view_000", "view_012"])
+            self.assertEqual(reconstruct_session(raw, processed, [0, 1], [0], calibration,
+                                                 fake_reconstruct), 0)
+            self.assertEqual(calls, ["view_000", "view_012", "view_012"])
+            summary = json.loads((processed / "reconstruction_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["failed"], 0)
+            self.assertEqual(summary["complete"], 2)
 
 
 if __name__ == "__main__":

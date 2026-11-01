@@ -18,7 +18,7 @@ from capture import (DEFAULT_LEFT_SERIAL, DEFAULT_RIGHT_SERIAL, close_cameras,
 from arm import POSE_TARGETS, open_controller
 from fixed_board import board_from_config, detect_corners_with_contrast_fallback
 
-DEFAULT_BOARD = ROOT / "turntable/targets/charuco_7x5_10mm_7mm_config.json"
+DEFAULT_BOARD = ROOT / "arm/targets/charuco_7x5_10mm_7mm_config.json"
 
 
 def save_png(path, image):

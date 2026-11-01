@@ -19,18 +19,18 @@ from capture_fixed_board import annotate_corners
 
 class FixedBoardTests(unittest.TestCase):
     def setUp(self):
-        self.config = json.loads((ROOT / "turntable/targets/charuco_7x5_10mm_7mm_config.json").read_text())
+        self.config = json.loads((ROOT / "arm/targets/charuco_7x5_10mm_7mm_config.json").read_text())
         self.board = board_from_config(self.config)
 
     def test_project_board_detects_all_internal_corners(self):
-        image = cv2.imread(str(ROOT / "turntable/targets/charuco_7x5_10mm_7mm_85x65mm.png"))
+        image = cv2.imread(str(ROOT / "arm/targets/charuco_7x5_10mm_7mm_85x65mm.png"))
         corners, ids = detect_corners(image, self.board)
         self.assertEqual(len(ids), 24)
         self.assertEqual(len(corners), 24)
         self.assertEqual(annotate_corners(image, corners, ids).shape, image.shape)
 
     def test_low_contrast_photo_uses_fallback(self):
-        image = cv2.imread(str(ROOT / "turntable/targets/charuco_7x5_10mm_7mm_85x65mm.png"), 0)
+        image = cv2.imread(str(ROOT / "arm/targets/charuco_7x5_10mm_7mm_85x65mm.png"), 0)
         noise = np.random.default_rng(10).normal(0, 2, image.shape)
         weak = np.clip(190 + 0.08 * (image.astype(float) - 127) + noise, 0, 255).astype(np.uint8)
         self.assertLess(len(detect_corners(weak, self.board)[1]), 12)
@@ -61,7 +61,7 @@ class FixedBoardTests(unittest.TestCase):
     def test_offline_calibration_reads_capture_manifest(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
-            image = cv2.imread(str(ROOT / "turntable/targets/charuco_7x5_10mm_7mm_85x65mm.png"))
+            image = cv2.imread(str(ROOT / "arm/targets/charuco_7x5_10mm_7mm_85x65mm.png"))
             shifted = cv2.warpAffine(image, np.float32([[1, 0, 35], [0, 1, 10]]),
                                       (image.shape[1], image.shape[0]),
                                       borderValue=(255, 255, 255))
@@ -84,7 +84,7 @@ class FixedBoardTests(unittest.TestCase):
             stereo_path = base / 'stereo.json'
             stereo_path.write_text(json.dumps(stereo))
             result = calibrate(base, stereo_path,
-                               ROOT / 'turntable/targets/charuco_7x5_10mm_7mm_config.json')
+                               ROOT / 'arm/targets/charuco_7x5_10mm_7mm_config.json')
             self.assertEqual(result['summary']['upper']['count'], 2)
             self.assertAlmostEqual(result['summary']['upper']['max_return_translation_mm'], 0, places=2)
             self.assertGreater(result['summary']['lower']['max_reprojection_rms_px'], 0)
