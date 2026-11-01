@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import scan_session
@@ -11,6 +12,37 @@ from scan_session import angles_for_range, pending_views, reconstruct_session, r
 
 
 class SessionPlanTests(unittest.TestCase):
+    def test_post_reconstruction_fuses_only_after_all_views_succeed(self):
+        args = SimpleNamespace(reconstruction_min_depth_mm=None,
+            reconstruction_max_depth_mm=None, no_fusion=False,
+            output=Path("raw"), processed_output=Path("processed"),
+            fusion_axis_images=Path("axis"), board=Path("board.json"),
+            fusion_radius_mm=65.0, fusion_height_mm=(-95.0, 110.0),
+            fusion_voxel_mm=1.0, fusion_exclude_view=[11])
+        session = Path("raw/object/session")
+        sources = [session / "view_000/repeat_001", session / "view_012/repeat_001"]
+        with patch("scan_session.reconstruct_session", return_value=0) as reconstruct, \
+             patch("scan_session.selected_complete_sources", return_value=sources), \
+             patch("fusion_pipeline.fuse_reconstructed_session") as fuse:
+            self.assertEqual(scan_session.finish_session(args, session,
+                Path("processed/object/session"), [0, 1], [0], Path("stereo.npz"),
+                lambda argv: 0), 0)
+            self.assertEqual(fuse.call_args.args[:3],
+                (session, sources, Path("stereo.npz")))
+            self.assertEqual(fuse.call_args.kwargs["exclude_view_ids"], {11})
+            reconstruct.return_value = 1
+            fuse.reset_mock()
+            self.assertEqual(scan_session.finish_session(args, session,
+                Path("processed/object/session"), [0, 1], [0], Path("stereo.npz"),
+                lambda argv: 0), 1)
+            fuse.assert_not_called()
+            reconstruct.return_value = 0
+            args.no_fusion = True
+            self.assertEqual(scan_session.finish_session(args, session,
+                Path("processed/object/session"), [0, 1], [0], Path("stereo.npz"),
+                lambda argv: 0), 0)
+            fuse.assert_not_called()
+
     def test_final_home_sends_zero_and_records_unverified_arrival(self):
         with tempfile.TemporaryDirectory() as td:
             class Controller:

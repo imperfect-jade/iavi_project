@@ -6,7 +6,7 @@
 
 固定板的实测方格边长必须与 `arm/targets/charuco_7x5_10mm_7mm_config.json` 一致，且在整次扫描中固定不动。它只有 70×50 mm，通常位于画面一侧，因此这一步主要校正当前会话的双目失配；正式量测仍需用独立标定板覆盖物体工作区验证。确需跳过本步骤时可加 `--no-board-stereo-correction`，此时重建使用 `--stereo` 对应的原 NPZ。
 
-全部视角拍摄成功后，程序向转台再次发送 0° 指令，默认等待 12 秒，再关闭相机、机械臂和转台串口，按视角顺序调用 `code/reconstruct_view.py`。结束回零命令记录在会话根目录的 `turntable_final_home.json`；串口发送和等待不等于实际到位反馈。每个结果写入 `processed/<object-id>/<session-id>/view_###/repeat_###/`，包含 `cloud_left.ply`、`qc.json` 和 `reconstruction_status.json`；会话级结果写入 `processed/<object-id>/<session-id>/reconstruction_summary.json`。重建失败不丢失原始照片，程序继续处理其余视角，最终以非零退出码报告失败；本阶段不做点云融合。
+全部视角拍摄成功后，程序向转台再次发送 0° 指令，默认等待 12 秒，再关闭相机、机械臂和转台串口，按视角顺序调用 `code/reconstruct_view.py`。结束回零命令记录在会话根目录的 `turntable_final_home.json`；串口发送和等待不等于实际到位反馈。每个结果写入 `processed/<object-id>/<session-id>/view_###/repeat_###/`，包含 `cloud_left.ply`、`qc.json` 和 `reconstruction_status.json`；会话级结果写入 `processed/<object-id>/<session-id>/reconstruction_summary.json`。重建失败不丢失原始照片，程序继续处理其余视角，最终以非零退出码报告失败。**全部视角重建成功后，默认自动运行转台轴标定、固定板坐标注册及点云融合。**
 
 从项目根目录运行：
 
@@ -20,10 +20,22 @@ python system\scan_session.py --port COM6 --arm-port COM7 --start-angle 0 --end-
 
 按空格开始预览后的扫描，Q 或 Esc 在运动前取消。每个完成的 `raw/<object-id>/<session-id>/view_###/repeat_###/` 中保存 `localization/left.png`、`localization/right.png`、`localization.json`、`pose.json` 和原有点阵文件。会话根目录的 `camera_poses.json` 使用 `view_###/repeat_###` 键，值为该次 `T_reference_from_left`，可传给 `fuse_views.py --camera-poses`。定位或点阵拍摄失败即停止；失败目录保留，用新 `--repeat-id` 和 `--resume` 继续。相机相对双目标定发生变化时须重标定。
 
-如果拍摄已完成，使用相同拍摄参数加 `--resume` 会跳过拍摄和硬件连接，先校正双目，再补做失败或标定已变化的重建。也可单独检查已拍会话的板校正：`python system\board_stereo_correction.py --session-root raw\object_007\session_01`。重建自动估计深度范围；仅在双目校正已经通过、但自动视差范围仍失败时，才同时提供 `--reconstruction-min-depth-mm 550 --reconstruction-max-depth-mm 1100` 重试。重建输出目录可用 `--processed-output` 指定。重建使用的深度范围或标定文件内容改变时，会重新运行相应视角。
+如果拍摄已完成，使用相同拍摄参数加 `--resume` 会跳过拍摄和硬件连接，先校正双目，再补做失败或标定已变化的重建，最后重新融合。也可单独检查已拍会话的板校正：`python system\board_stereo_correction.py --session-root raw\object_007\session_01`。重建自动估计深度范围；仅在双目校正已经通过、但自动视差范围仍失败时，才同时提供 `--reconstruction-min-depth-mm 550 --reconstruction-max-depth-mm 1100` 重试。重建输出目录可用 `--processed-output` 指定。重建使用的深度范围或标定文件内容改变时，会重新运行相应视角。
 
 ```powershell
 python system\scan_session.py --port COM6 --arm-port COM7 --start-angle 0 --end-angle 330 --step-angle 30 --object-id object_001 --session-id session_01 --resume --reconstruction-min-depth-mm 550 --reconstruction-max-depth-mm 1100
 ```
 
-本项目统一使用首次下位姿左相机作为定位与融合参考系。转台轴在相同的下位姿相机位置标定；融合时使用 `--axis-already-in-reference`。固定板、机械臂或相机位置改变后须重新核对这一关系。**会话板校正只修正扫描图的双目参数，不会修复旧转台轴结果**；`fuse_views.py` 会拒绝把使用旧标定求得的轴与修正标定点云混用。需要重新标定转台轴并把轴坐标变换到同一参考系，才能做正式融合。
+## 自动融合
+
+默认从 `raw/turntable_axis/axis_cube_01` 读取完整转台轴照片；新拍轴标定时用 `--fusion-axis-images raw/turntable_axis/<session-id>` 指定。自动融合**用当前扫描会话的双目参数重新解算轴**，再从轴照片中选择一张可靠的固定板左图，利用扫描定位图把轴转换到统一参考系。因此固定板在轴采集和物体扫描之间必须保持原位；轴照片中的固定板至少需要 6 个非共线 ChArUco 角点，且定位 RMS 不超过 2 px。轴拟合 RMS 超过 3 mm 或回零角点位移超过 2 px 时融合停止并报告错误。
+
+默认物体裁剪为轴周围半径 65 mm、高度 -95～110 mm，体素 1 mm；可用 `--fusion-radius-mm`、`--fusion-height-mm MIN MAX`、`--fusion-voxel-mm` 按物体尺寸调整。默认融合所有选定视角；疑似异常视角可用 `--fusion-exclude-view 11` 排除，多次传入可排除多个视角。`--resume` 时可以改变这些融合参数而不重新拍摄。确需只重建、不融合时使用 `--no-fusion`。
+
+最终点云在 `processed/fused/<object-id>/<session-id>/all_views_axis_calibrated/fused.ply`，同时保存 `fusion.json`、逐视角 `aligned/*.ply`、会话专属 `fusion_calibration/axis_calibration.json`、`fusion_calibration/axis_to_reference.json` 和 `fusion_status.json`。默认只选每个视角最新的完整 repeat；融合失败会以非零退出码报告并保留原始照片和已完成的重建。裁剪范围和轴质量门限需按实际物体核对，自动结果是点云而非封闭网格。
+
+用已拍的 `object_008` 重新生成本文推荐的杯体融合（不会打开硬件）：
+
+```powershell
+python system\scan_session.py --port COM8 --arm-port COM9 --start-angle 0 --end-angle 330 --step-angle 30 --object-id object_008 --session-id session_01 --resume --fusion-exclude-view 11 --fusion-height-mm -85 95
+```

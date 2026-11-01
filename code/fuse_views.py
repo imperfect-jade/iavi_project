@@ -115,8 +115,12 @@ def main(argv=None):
                         help="discover every view_*/repeat_* in one object session")
     source.add_argument("--view-root", type=Path, nargs="+",
                    help="one or more raw/object/session/view_NNN directories")
+    source.add_argument("--repeat-root", type=Path, nargs="+",
+                        help="specific repeat directories; avoids older repeats on resumed scans")
     p.add_argument("--arm-pose-id", type=int, choices=(0, 1),
                    help="fuse only one arm pose: 0=upper, 1=lower; omit for all poses")
+    p.add_argument("--raw-root", type=Path, default=ROOT / "raw",
+                   help="root of the captured object/session hierarchy")
     p.add_argument("--processed-root", type=Path, default=ROOT / "processed")
     p.add_argument("--output", type=Path, help="defaults to processed/fused/object/session/view_NNN")
     p.add_argument("--bounds-mm", type=float, nargs=6,
@@ -173,8 +177,11 @@ def main(argv=None):
         axis_transform = validate_rigid_transform(
             raw_transform.get("T_reference_from_axis_camera") if isinstance(raw_transform, dict) else raw_transform,
             "axis-to-reference")
-    roots = (sorted(args.session_root.resolve().glob("view_*")) if args.session_root
-             else [path.resolve() for path in args.view_root])
+    selected_repeats = ([path.resolve() for path in args.repeat_root]
+                        if args.repeat_root else None)
+    roots = (sorted(args.session_root.resolve().glob("view_*")) if args.session_root else
+             list(dict.fromkeys(path.parent for path in selected_repeats)) if selected_repeats else
+             [path.resolve() for path in args.view_root])
     roots = [path for path in roots if path.is_dir()]
     if not roots:
         raise ValueError("No view directories found")
@@ -186,7 +193,11 @@ def main(argv=None):
                     "all_views" if args.session_root else
                     roots[0].name + ("_axis_calibrated" if axis_cal else ""))
     output = args.output or ROOT / "processed" / "fused" / roots[0].parent.parent.name / roots[0].parent.name / default_name
-    repeats = [(root, path) for root in roots for path in sorted(root.glob("repeat_*/pose.json"))]
+    repeats = ([(path.parent, path / "pose.json") for path in selected_repeats]
+               if selected_repeats else
+               [(root, path) for root in roots for path in sorted(root.glob("repeat_*/pose.json"))])
+    if any(not path.is_file() for _, path in repeats):
+        raise ValueError("Selected repeat is missing pose.json")
     if len(repeats) < 2:
         raise ValueError("Need at least two captured angles")
     scans = []
@@ -200,7 +211,7 @@ def main(argv=None):
             raise ValueError(f"Incomplete or unsupported scan: {name}")
         if pose["arm_pose_id"] != manifest["arm_pose_id"] or pose["turntable_deg_commanded"] != manifest["turntable_deg_commanded"]:
             raise ValueError(f"Pose and scan manifest disagree: {name}")
-        result = args.processed_root / root.relative_to(ROOT / "raw") / pose_path.parent.name
+        result = args.processed_root / root.relative_to(args.raw_root.resolve()) / pose_path.parent.name
         qc = json.loads((result / "qc.json").read_text(encoding="utf-8"))
         if qc["point_count"] < 1 or qc["coordinate_frame"] != "rectified_left_camera":
             raise ValueError(f"Invalid reconstruction: {name}")
@@ -265,11 +276,13 @@ def main(argv=None):
     output_frame = ("turntable_zero_provisional" if axis_transform_status and
                     str(axis_transform_status).startswith("provisional") else
                     "turntable_zero_calibrated" if axis_cal else "turntable_zero_estimated")
-    all_xyz, all_bgr, summary = [], [], []
+    all_xyz, all_bgr, summary, aligned_names = [], [], [], set()
     for row in scans:
         aligned = rotate_about_axis(row["xyz"], center, axis, -args.angle_sign * row["angle"])
         filename = row["name"].split("/")[-1] if len(roots) == 1 else row["name"].replace("/", "_")
-        write_ply(output / "aligned" / f"{filename}.ply", aligned, row["bgr"], output_frame)
+        aligned_name = f"{filename}.ply"
+        write_ply(output / "aligned" / aligned_name, aligned, row["bgr"], output_frame)
+        aligned_names.add(aligned_name)
         all_xyz.append(aligned)
         all_bgr.append(row["bgr"])
         summary.append({"repeat": row["name"], "command_angle_deg": row["command_angle"],
@@ -278,9 +291,13 @@ def main(argv=None):
         print(f"{row['name']}: {row['angle']:g} deg, {len(aligned):,} object points", flush=True)
     points, colors = voxel_average(np.concatenate(all_xyz), np.concatenate(all_bgr), args.voxel_mm)
     write_ply(output / "fused.ply", points, colors, output_frame)
+    for stale in (output / "aligned").glob("*.ply"):
+        if stale.name not in aligned_names:
+            stale.unlink()
     report = {"coordinate_frame": output_frame, "reference_camera_pose": "first_lower_pose_left_camera" if poses_path else "input_left_camera",
               "selected_arm_pose_id": args.arm_pose_id,
               "unit": "mm", "sources": [str(root) for root in roots],
+              "selected_repeats": [str(path.parent) for _, path in repeats],
               "axis_point_mm": center.tolist(), "axis_direction": (axis/np.linalg.norm(axis)).tolist(),
               "axis_source": axis_source, "axis_calibration": str(axis_path.resolve()) if axis_cal else None,
               "camera_poses": str(poses_path.resolve()) if poses_path else None,

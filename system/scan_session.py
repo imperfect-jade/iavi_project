@@ -165,6 +165,30 @@ def reconstruct_session(session_root: Path, processed_root: Path, pose_ids: list
     return 1 if summary["failed"] else 0
 
 
+def finish_session(args, session_root: Path, processed_root: Path,
+                   pose_ids: list[int], angles: list[int], calibration: Path,
+                   reconstruct) -> int:
+    """Reconstruct first, then fuse the selected repeats if every view passed."""
+    result = reconstruct_session(session_root, processed_root, pose_ids, angles,
+                                 calibration, reconstruct,
+                                 args.reconstruction_min_depth_mm,
+                                 args.reconstruction_max_depth_mm)
+    if result or args.no_fusion:
+        return result
+    from fusion_pipeline import fuse_reconstructed_session
+    try:
+        sources = selected_complete_sources(session_root, pose_ids, angles)
+        fuse_reconstructed_session(
+            session_root, sources, calibration, args.fusion_axis_images, args.board,
+            args.output, args.processed_output, radius_mm=args.fusion_radius_mm,
+            height_mm=tuple(args.fusion_height_mm), voxel_mm=args.fusion_voxel_mm,
+            exclude_view_ids=set(args.fusion_exclude_view or ()))
+        return 0
+    except Exception as exc:
+        print(f"[ERROR] Automatic fusion: {exc}", flush=True)
+        return 1
+
+
 def load_reference(path: Path, board_config: dict, stereo_path: Path):
     import numpy as np
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -218,6 +242,17 @@ def parser():
     p.add_argument("--reconstruction-max-depth-mm", type=float)
     p.add_argument("--no-board-stereo-correction", action="store_true",
                    help="Use the original stereo calibration without fitting the scan's paired fixed-board images")
+    p.add_argument("--no-fusion", action="store_true",
+                   help="Reconstruct views but skip automatic point cloud fusion")
+    p.add_argument("--fusion-axis-images", type=Path,
+                   default=ROOT / "raw/turntable_axis/axis_cube_01",
+                   help="complete turntable axis photo session to recalibrate with this scan's stereo geometry")
+    p.add_argument("--fusion-radius-mm", type=float, default=65.0)
+    p.add_argument("--fusion-height-mm", type=float, nargs=2, default=(-95.0, 110.0),
+                   metavar=("MIN", "MAX"))
+    p.add_argument("--fusion-voxel-mm", type=float, default=1.0)
+    p.add_argument("--fusion-exclude-view", type=int, choices=range(24), action="append",
+                   metavar="VIEW_ID", help="exclude a suspect view ID; may be repeated")
     p.add_argument("--left-serial", default="40031431")
     p.add_argument("--right-serial", default="40031435")
     p.add_argument("--display", help="Exact projector display name if its location changed")
@@ -264,6 +299,12 @@ def main(argv=None) -> int:
         raise ValueError("Set both reconstruction depth bounds or neither")
     if args.reconstruction_min_depth_mm is not None and not (0 < args.reconstruction_min_depth_mm < args.reconstruction_max_depth_mm):
         raise ValueError("Invalid reconstruction depth range")
+    if not args.no_fusion and (args.fusion_radius_mm <= 0 or args.fusion_voxel_mm <= 0 or
+                               args.fusion_height_mm[0] >= args.fusion_height_mm[1]):
+        raise ValueError("Invalid fusion radius, height or voxel size")
+    if not args.no_fusion:
+        from fusion_pipeline import validate_axis_capture
+        validate_axis_capture(args.fusion_axis_images)
     calibration_npz = args.stereo.with_suffix(".npz")
     if not calibration_npz.is_file():
         raise FileNotFoundError(f"Stereo reconstruction calibration missing: {calibration_npz}")
@@ -296,10 +337,8 @@ def main(argv=None) -> int:
         reconstruction_calibration = prepare_reconstruction_calibration(
             session_root, processed_root, pose_ids, angles, calibration_npz,
             args.board, enabled=not args.no_board_stereo_correction)
-        return reconstruct_session(session_root, processed_root, pose_ids, angles,
-                                   reconstruction_calibration, reconstruct_view,
-                                   args.reconstruction_min_depth_mm,
-                                   args.reconstruction_max_depth_mm)
+        return finish_session(args, session_root, processed_root, pose_ids, angles,
+                              reconstruction_calibration, reconstruct_view)
 
     display = select_projector_display(displays(), args.display)
     patterns = make_dense_dots(dot_cell=args.dot_cell_px, seed=args.dot_seed,
@@ -418,10 +457,8 @@ def main(argv=None) -> int:
     reconstruction_calibration = prepare_reconstruction_calibration(
         session_root, processed_root, pose_ids, angles, calibration_npz,
         args.board, enabled=not args.no_board_stereo_correction)
-    return reconstruct_session(session_root, processed_root, pose_ids, angles,
-                               reconstruction_calibration, reconstruct_view,
-                               args.reconstruction_min_depth_mm,
-                               args.reconstruction_max_depth_mm)
+    return finish_session(args, session_root, processed_root, pose_ids, angles,
+                          reconstruction_calibration, reconstruct_view)
 
 
 if __name__ == "__main__":
