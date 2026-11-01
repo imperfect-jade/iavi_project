@@ -3,8 +3,10 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import scan_session
 from scan_session import angles_for_range, pending_views, reconstruct_session
 
 
@@ -24,6 +26,7 @@ class SessionPlanTests(unittest.TestCase):
             (done / "right.png").write_bytes(b"right")
             (done / "localization").mkdir()
             (done / "localization" / "left.png").write_bytes(b"board")
+            (done / "localization" / "right.png").write_bytes(b"board")
             (done / "localization.json").write_text("{}", encoding="utf-8")
             (done / "manifest.json").write_text(json.dumps({
                 "complete": True, "view_id": 14, "arm_pose_id": 1,
@@ -51,6 +54,7 @@ class SessionPlanTests(unittest.TestCase):
                 (folder / "right.png").write_bytes(b"image")
                 (folder / "localization").mkdir()
                 (folder / "localization" / "left.png").write_bytes(b"board")
+                (folder / "localization" / "right.png").write_bytes(b"board")
                 (folder / "localization.json").write_text("{}", encoding="utf-8")
                 (folder / "manifest.json").write_text(json.dumps({
                     "complete": True, "view_id": view_id, "arm_pose_id": pose_id,
@@ -78,6 +82,45 @@ class SessionPlanTests(unittest.TestCase):
             summary = json.loads((processed / "reconstruction_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary["failed"], 0)
             self.assertEqual(summary["complete"], 2)
+
+            corrected = root / "corrected.npz"
+            corrected.write_bytes(b"new calibration geometry")
+            self.assertEqual(reconstruct_session(raw, processed, [0, 1], [0], corrected,
+                                                 fake_reconstruct), 0)
+            self.assertEqual(calls[-2:], ["view_000", "view_012"])
+
+    def test_prepares_board_correction_from_same_latest_complete_repeats(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            raw = root / "raw" / "object" / "session"
+            processed = root / "processed" / "object" / "session"
+            base = root / "base.npz"
+            board = root / "board.json"
+            base.write_bytes(b"base")
+            board.write_text("{}", encoding="utf-8")
+            for repeat in (1, 2):
+                folder = raw / "view_000" / f"repeat_{repeat:03d}"
+                folder.mkdir(parents=True)
+                (folder / "left.png").write_bytes(b"left")
+                (folder / "right.png").write_bytes(b"right")
+                (folder / "localization").mkdir()
+                (folder / "localization" / "left.png").write_bytes(b"board")
+                (folder / "localization" / "right.png").write_bytes(b"board")
+                (folder / "localization.json").write_text("{}", encoding="utf-8")
+                (folder / "manifest.json").write_text(json.dumps({
+                    "complete": True, "view_id": 0, "arm_pose_id": 0,
+                    "turntable_deg_commanded": 0, "protocol": "dense_dots_v2",
+                    "frame_count": 1, "frames": [{"left": "left.png", "right": "right.png"}]}),
+                    encoding="utf-8")
+            chosen = root / "corrected.npz"
+            with patch("board_stereo_correction.derive_session_calibration", return_value=chosen) as derive:
+                result = scan_session.prepare_reconstruction_calibration(
+                    raw, processed, [0], [0], base, board, enabled=True)
+            self.assertEqual(result, chosen)
+            self.assertEqual(derive.call_args.args[0], [raw / "view_000" / "repeat_002"])
+            self.assertEqual(derive.call_args.args[3], processed / "board_stereo_correction")
+            self.assertEqual(scan_session.prepare_reconstruction_calibration(
+                raw, processed, [0], [0], base, board, enabled=False), base)
 
 
 if __name__ == "__main__":

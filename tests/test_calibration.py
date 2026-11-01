@@ -10,11 +10,23 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
+import calibrate_stereo
 from calibrate_stereo import board_points, pairs, detect, check_validation_error, select_outliers, calibration_flags, find_corners
 from calibrate_color import fit_color, chart_samples, apply_color_transform, color_pair_name
 
 
 class CalibrationTests(unittest.TestCase):
+    def test_stereo_calibration_requires_explicit_square_size(self):
+        parser = calibrate_stereo.build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["--validation", "validation"])
+
+    def test_stereo_calibration_uses_standard_five_coefficient_model_by_default(self):
+        args = calibrate_stereo.build_parser().parse_args(
+            ["--validation", "validation", "--square-mm", "12"])
+        self.assertEqual(args.distortion_model, "standard5")
+        self.assertEqual(args.square_mm, 12)
+
     def test_color_annotation_name_uses_prefix(self):
         self.assertEqual(color_pair_name("color_001"), "color_001")
         with self.assertRaises(ValueError): color_pair_name("001_color")
@@ -41,6 +53,32 @@ class CalibrationTests(unittest.TestCase):
         rejected = select_outliers(rows)
         self.assertEqual(list(rejected), ["calib_012.png"])
         self.assertIn("epipolar", rejected["calib_012.png"])
+
+    def test_auto_exclusion_removes_training_outlier_and_keeps_reason(self):
+        records = [(f"calib_{i:03d}.png",) for i in range(1, 13)]
+        rows = [{"image": record[0], "epipolar_median_px": .20 + i*.01,
+                 "left_reprojection_rms_px": .20, "right_reprojection_rms_px": .22}
+                for i, record in enumerate(records)]
+        rows[-1]["epipolar_median_px"] = 2.4
+        excluded, remaining, automatic = calibrate_stereo.choose_training_exclusions(
+            records, select_outliers(rows), set())
+        self.assertEqual([record[0] for record in excluded], ["calib_012.png"])
+        self.assertEqual(len(remaining), 11)
+        self.assertIn("epipolar", automatic["calib_012.png"])
+
+    def test_auto_exclusion_stops_when_too_many_pairs_are_flagged(self):
+        records = [(f"calib_{i:03d}.png",) for i in range(1, 11)]
+        suggestions = {record[0]: "high error" for record in records[-3:]}
+        with self.assertRaisesRegex(ValueError, "Too many automatic exclusions"):
+            calibrate_stereo.choose_training_exclusions(records, suggestions, set())
+
+    def test_manual_exclusion_can_be_used_without_automatic_exclusion(self):
+        records = [(f"calib_{i:03d}.png",) for i in range(1, 13)]
+        excluded, remaining, automatic = calibrate_stereo.choose_training_exclusions(
+            records, {"calib_012.png": "high error"}, {3}, auto_enabled=False)
+        self.assertEqual([record[0] for record in excluded], ["calib_003.png"])
+        self.assertEqual(len(remaining), 11)
+        self.assertEqual(automatic, {})
 
     def test_bad_independent_validation_is_rejected(self):
         rows = [{"image": "calib_001.png", "epipolar_median_px": 20.4,

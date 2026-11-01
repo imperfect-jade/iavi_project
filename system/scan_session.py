@@ -61,7 +61,37 @@ def is_complete_view(folder: Path, view_id: int, arm_pose_id: int, angle: int) -
                 manifest.get("turntable_deg_commanded") == angle and
                 manifest.get("protocol") == "dense_dots_v2" and
                 (folder / "localization" / "left.png").is_file() and
+                (folder / "localization" / "right.png").is_file() and
                 (folder / "localization.json").is_file())
+
+
+def selected_complete_sources(session_root: Path, pose_ids: list[int],
+                              angles: list[int]) -> list[Path]:
+    """Choose the latest complete repeat of each requested view."""
+    selected = []
+    for pose_id in pose_ids:
+        for angle in angles:
+            view_id = pose_id * 12 + angle // 30
+            view_root = session_root / f"view_{view_id:03d}"
+            candidates = [folder for folder in sorted(view_root.glob("repeat_*"))
+                          if is_complete_view(folder, view_id, pose_id, angle)]
+            if not candidates:
+                raise ValueError(f"No complete capture for {view_root}")
+            selected.append(candidates[-1])
+    return selected
+
+
+def prepare_reconstruction_calibration(session_root: Path, processed_root: Path,
+                                       pose_ids: list[int], angles: list[int],
+                                       base_calibration: Path, board: Path,
+                                       enabled: bool = True) -> Path:
+    """Validate a session board fit before allowing its views to reconstruct."""
+    if not enabled:
+        return base_calibration
+    from board_stereo_correction import derive_session_calibration
+    sources = selected_complete_sources(session_root, pose_ids, angles)
+    return derive_session_calibration(sources, base_calibration, board,
+                                      processed_root / "board_stereo_correction")
 
 
 def reconstruct_session(session_root: Path, processed_root: Path, pose_ids: list[int],
@@ -74,56 +104,51 @@ def reconstruct_session(session_root: Path, processed_root: Path, pose_ids: list
     processed_root.mkdir(parents=True, exist_ok=True)
     calibration = calibration.resolve()
     calibration_hash = hashlib.sha256(calibration.read_bytes()).hexdigest()
-    summary = {"complete": 0, "skipped": 0, "failed": 0, "views": {}}
-    for pose_id in pose_ids:
-        for angle in angles:
-            view_id = pose_id * 12 + angle // 30
-            view_root = session_root / f"view_{view_id:03d}"
-            candidates = [folder for folder in sorted(view_root.glob("repeat_*"))
-                          if is_complete_view(folder, view_id, pose_id, angle)]
-            if not candidates:
-                raise ValueError(f"No complete capture for {view_root}")
-            source = candidates[-1]
-            name = f"{view_root.name}/{source.name}"
-            target = processed_root / view_root.name / source.name
-            target.mkdir(parents=True, exist_ok=True)
-            status_path = target / "reconstruction_status.json"
-            fingerprint = {"source_manifest_sha256": hashlib.sha256(
-                (source / "manifest.json").read_bytes()).hexdigest(),
-                "calibration_sha256": calibration_hash,
-                "min_depth_mm": min_depth_mm, "max_depth_mm": max_depth_mm}
-            if status_path.is_file():
-                status = json.loads(status_path.read_text(encoding="utf-8"))
-                if (status.get("state") == "complete" and
-                    all(status.get(key) == value for key, value in fingerprint.items()) and
-                    (target / "cloud_left.ply").is_file() and (target / "qc.json").is_file()):
-                    summary["complete"] += 1
-                    summary["skipped"] += 1
-                    summary["views"][name] = "skipped"
-                    print(f"Reconstruction already complete: {name}", flush=True)
-                    continue
-            _write_json(status_path, {**fingerprint, "state": "running"})
-            command = ["--view", str(source), "--output", str(target),
-                       "--calibration", str(calibration)]
-            if min_depth_mm is not None:
-                command += ["--min-depth-mm", str(min_depth_mm),
-                            "--max-depth-mm", str(max_depth_mm)]
-            print(f"Reconstructing {name}", flush=True)
-            try:
-                result = reconstruct(command)
-                if result != 0 or not (target / "qc.json").is_file() or not (target / "cloud_left.ply").is_file():
-                    raise RuntimeError(f"Reconstruction returned {result} or did not produce required outputs")
-                qc = json.loads((target / "qc.json").read_text(encoding="utf-8"))
-                _write_json(status_path, {**fingerprint, "state": "complete",
-                                          "point_count": qc.get("point_count"),
-                                          "warnings": qc.get("warnings", [])})
+    summary = {"complete": 0, "skipped": 0, "failed": 0,
+               "calibration": str(calibration),
+               "calibration_sha256": calibration_hash, "views": {}}
+    for source in selected_complete_sources(session_root, pose_ids, angles):
+        view_root = source.parent
+        name = f"{view_root.name}/{source.name}"
+        target = processed_root / view_root.name / source.name
+        target.mkdir(parents=True, exist_ok=True)
+        status_path = target / "reconstruction_status.json"
+        fingerprint = {"source_manifest_sha256": hashlib.sha256(
+            (source / "manifest.json").read_bytes()).hexdigest(),
+            "calibration_sha256": calibration_hash,
+            "min_depth_mm": min_depth_mm, "max_depth_mm": max_depth_mm}
+        if status_path.is_file():
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            if (status.get("state") == "complete" and
+                all(status.get(key) == value for key, value in fingerprint.items()) and
+                (target / "cloud_left.ply").is_file() and (target / "qc.json").is_file()):
                 summary["complete"] += 1
-                summary["views"][name] = "complete"
-            except Exception as exc:
-                _write_json(status_path, {**fingerprint, "state": "failed", "error": str(exc)})
-                summary["failed"] += 1
-                summary["views"][name] = f"failed: {exc}"
-                print(f"[ERROR] Reconstruction {name}: {exc}", flush=True)
+                summary["skipped"] += 1
+                summary["views"][name] = "skipped"
+                print(f"Reconstruction already complete: {name}", flush=True)
+                continue
+        _write_json(status_path, {**fingerprint, "state": "running"})
+        command = ["--view", str(source), "--output", str(target),
+                   "--calibration", str(calibration)]
+        if min_depth_mm is not None:
+            command += ["--min-depth-mm", str(min_depth_mm),
+                        "--max-depth-mm", str(max_depth_mm)]
+        print(f"Reconstructing {name}", flush=True)
+        try:
+            result = reconstruct(command)
+            if result != 0 or not (target / "qc.json").is_file() or not (target / "cloud_left.ply").is_file():
+                raise RuntimeError(f"Reconstruction returned {result} or did not produce required outputs")
+            qc = json.loads((target / "qc.json").read_text(encoding="utf-8"))
+            _write_json(status_path, {**fingerprint, "state": "complete",
+                                      "point_count": qc.get("point_count"),
+                                      "warnings": qc.get("warnings", [])})
+            summary["complete"] += 1
+            summary["views"][name] = "complete"
+        except Exception as exc:
+            _write_json(status_path, {**fingerprint, "state": "failed", "error": str(exc)})
+            summary["failed"] += 1
+            summary["views"][name] = f"failed: {exc}"
+            print(f"[ERROR] Reconstruction {name}: {exc}", flush=True)
     _write_json(processed_root / "reconstruction_summary.json", summary)
     return 1 if summary["failed"] else 0
 
@@ -179,6 +204,8 @@ def parser():
     p.add_argument("--processed-output", type=Path, default=ROOT / "processed")
     p.add_argument("--reconstruction-min-depth-mm", type=float)
     p.add_argument("--reconstruction-max-depth-mm", type=float)
+    p.add_argument("--no-board-stereo-correction", action="store_true",
+                   help="Use the original stereo calibration without fitting the scan's paired fixed-board images")
     p.add_argument("--left-serial", default="40031431")
     p.add_argument("--right-serial", default="40031435")
     p.add_argument("--display", help="Exact projector display name if its location changed")
@@ -254,8 +281,11 @@ def main(argv=None) -> int:
     if not pending:
         print("All requested views already captured; checking reconstruction.")
         from reconstruct_view import main as reconstruct_view
+        reconstruction_calibration = prepare_reconstruction_calibration(
+            session_root, processed_root, pose_ids, angles, calibration_npz,
+            args.board, enabled=not args.no_board_stereo_correction)
         return reconstruct_session(session_root, processed_root, pose_ids, angles,
-                                   calibration_npz, reconstruct_view,
+                                   reconstruction_calibration, reconstruct_view,
                                    args.reconstruction_min_depth_mm,
                                    args.reconstruction_max_depth_mm)
 
@@ -372,8 +402,11 @@ def main(argv=None) -> int:
             close_cameras(cameras)
         cv2.destroyAllWindows()
     from reconstruct_view import main as reconstruct_view
+    reconstruction_calibration = prepare_reconstruction_calibration(
+        session_root, processed_root, pose_ids, angles, calibration_npz,
+        args.board, enabled=not args.no_board_stereo_correction)
     return reconstruct_session(session_root, processed_root, pose_ids, angles,
-                               calibration_npz, reconstruct_view,
+                               reconstruction_calibration, reconstruct_view,
                                args.reconstruction_min_depth_mm,
                                args.reconstruction_max_depth_mm)
 

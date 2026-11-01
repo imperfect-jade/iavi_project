@@ -212,7 +212,7 @@ def check_validation_error(rows, max_median_px):
 
 
 def select_outliers(rows):
-    """Suggest conspicuous training outliers; never exclude them automatically."""
+    """Flag conspicuous training outliers from the initial fit."""
     flagged = {}
     for key, label, floor in (("epipolar_median_px", "epipolar", .75),
                               ("left_reprojection_rms_px", "left RMS", .8),
@@ -226,7 +226,31 @@ def select_outliers(rows):
     return {name: "; ".join(reasons) for name, reasons in flagged.items()}
 
 
-def fit_stereo(records, size, obj, distortion_model="radial2", alpha=0.0):
+def choose_training_exclusions(records, suggestions, manual_numbers, auto_enabled=True):
+    """Exclude flagged training pairs, with a cap against removing a whole pose group."""
+    names = {record[0] for record in records}
+    numbered = {int(name.removeprefix("calib_").removesuffix(".png")): name for name in names}
+    unknown = manual_numbers - numbered.keys()
+    if unknown:
+        raise ValueError(f"--exclude contains unknown training numbers: {sorted(unknown)}")
+    if suggestions.keys() - names:
+        raise ValueError("Outlier suggestions contain unknown training pairs")
+    manual_names = {numbered[number] for number in manual_numbers}
+    automatic = ({name: reason for name, reason in suggestions.items()
+                  if name not in manual_names} if auto_enabled else {})
+    max_automatic = max(1, len(records) // 5)
+    if len(automatic) > max_automatic:
+        raise ValueError(f"Too many automatic exclusions ({len(automatic)}/{len(records)}): "
+                         f"{', '.join(automatic)}. Review the images or use --no-auto-exclude.")
+    excluded_names = manual_names | automatic.keys()
+    excluded = [record for record in records if record[0] in excluded_names]
+    remaining = [record for record in records if record[0] not in excluded_names]
+    if len(remaining) < 8:
+        raise ValueError("At least eight training pairs must remain after exclusions")
+    return excluded, remaining, automatic
+
+
+def fit_stereo(records, size, obj, distortion_model="standard5", alpha=0.0):
     objects = [obj.copy() for _ in records]
     lc, rc = [[record[i] for record in records] for i in (1, 2)]
     criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 100, 1e-9)
@@ -249,15 +273,17 @@ def fit_stereo(records, size, obj, distortion_model="radial2", alpha=0.0):
     return model, (l_rms, r_rms, stereo_rms)
 
 
-def main(argv=None):
+def build_parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--train", type=Path, default=ROOT / "raw/calibration/session_01")
     p.add_argument("--validation", type=Path, required=True,
                    help="independent board pairs; must be a separate directory")
     p.add_argument("--output", type=Path, default=ROOT / "calibration/stereo")
-    p.add_argument("--square-mm", type=float, default=20)
+    p.add_argument("--square-mm", type=float, required=True,
+                   help="measured horizontal square size in millimetres; required for correct 3D scale")
     p.add_argument("--square-y-mm", type=float, help="measured vertical square size; defaults to --square-mm")
-    p.add_argument("--distortion-model", choices=("radial2", "standard5"), default="radial2")
+    p.add_argument("--distortion-model", choices=("radial2", "standard5"), default="standard5",
+                   help="lens distortion model; standard5 estimates k1, k2, p1, p2, k3 (default)")
     p.add_argument("--alpha", type=float, default=0.0,
                    help="Lab5 stereoRectify crop parameter: 0=crop, 1=retain all")
     p.add_argument("--left-serial", default="40031431")
@@ -265,6 +291,13 @@ def main(argv=None):
     p.add_argument("--max-validation-epipolar-px", type=float, default=2.0,
                    help="maximum held-out per-image median |dy|; p95 must be <= 1.5 times this")
     p.add_argument("--exclude", default="", help="comma-separated TRAIN pair numbers, e.g. 3,17; applied after all-pair report")
+    p.add_argument("--no-auto-exclude", action="store_false", dest="auto_exclude",
+                   help="report suspicious training pairs without automatically excluding them")
+    return p
+
+
+def main(argv=None):
+    p = build_parser()
     args = p.parse_args(argv)
     if args.train.resolve() == args.validation.resolve():
         p.error("Train and validation directories must differ")
@@ -293,13 +326,10 @@ def main(argv=None):
               + (f" [REVIEW: {suggestions[row['image']]}]" if row['image'] in suggestions else ""), flush=True)
     print(f"Initial RMS: left={initial_rms[0]:.3f}, right={initial_rms[1]:.3f}, stereo={initial_rms[2]:.3f}px", flush=True)
     excluded_numbers = {int(x.strip()) for x in args.exclude.split(",") if x.strip()}
-    known_numbers = {int(record[0].removeprefix("calib_").removesuffix(".png")) for record in train}
-    if excluded_numbers - known_numbers:
-        raise ValueError(f"--exclude contains unknown training numbers: {sorted(excluded_numbers-known_numbers)}")
-    excluded = [record for record in train if int(record[0].removeprefix("calib_").removesuffix(".png")) in excluded_numbers]
-    final_train = [record for record in train if int(record[0].removeprefix("calib_").removesuffix(".png")) not in excluded_numbers]
-    if len(final_train) < 8:
-        raise ValueError("At least eight training pairs must remain after exclusions")
+    excluded, final_train, auto_excluded = choose_training_exclusions(
+        train, suggestions, excluded_numbers, args.auto_exclude)
+    for name, reason in auto_excluded.items():
+        print(f"[AUTO-EXCLUDE] {name}: {reason}", flush=True)
     print(f"Final fit: {len(final_train)} training pairs; excluded={[r[0] for r in excluded]}", flush=True)
     model, (l_rms, r_rms, stereo_rms) = fit_stereo(final_train, size, obj,
                                                    args.distortion_model, args.alpha)
@@ -324,6 +354,8 @@ def main(argv=None):
                 for p in (args.train / side).glob("calib_*.png"))},
         "train_pair_count": len(final_train), "initial_train_pair_count": len(train),
         "excluded_train_pairs": [r[0] for r in excluded],
+        "auto_excluded_train_pairs": auto_excluded,
+        "manual_excluded_train_pairs": [r[0] for r in excluded if r[0] not in auto_excluded],
         "suggested_train_outliers": suggestions,
         "initial_rms_px": {"left": initial_rms[0], "right": initial_rms[1], "stereo": initial_rms[2]},
         "validation_pair_count": len(valid),
