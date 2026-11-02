@@ -1,0 +1,17 @@
+{
+  "seed": 42,
+  "val_fraction": 0.2,
+  "max_dimension_mm": 100.0,
+  "target_height_mm": 50.0,
+  "camera_xyz_mm": [[240.0, 0.0, 120.0], [240.0, 0.0, 200.0]],
+  "stereo_baseline_mm": 75.0,
+  "projector_xyz_mm": [220.0, 90.0, 190.0],
+  "image_width": 160,
+  "image_height": 120,
+  "fov_deg": 45.0,
+  "noise_mm": 0.5,
+  "dropout": 0.1,
+  "voxel_mm": 1.5,
+  "coverage_tolerance_mm": 3.0,
+  "states_per_object": 200
+}

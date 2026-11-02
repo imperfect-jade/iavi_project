@@ -1,6 +1,5 @@
 import json
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -13,7 +12,6 @@ sys.path.insert(0, str(ROOT / "arm"))
 from fixed_board import (board_from_config, detect_corners,
                          detect_corners_with_contrast_fallback, estimate_pose,
                          relative_transform)
-from calibrate_fixed_board import calibrate
 from capture_fixed_board import annotate_corners
 
 
@@ -57,39 +55,6 @@ class FixedBoardTests(unittest.TestCase):
         point_in_2 = measured[1] @ np.array([12., 24., 0., 1.])
         point_in_1 = measured[0] @ np.array([12., 24., 0., 1.])
         np.testing.assert_allclose(T_1_2 @ point_in_2, point_in_1, atol=1e-3)
-
-    def test_offline_calibration_reads_capture_manifest(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            base = Path(temporary)
-            image = cv2.imread(str(ROOT / "arm/targets/charuco_7x5_10mm_7mm_85x65mm.png"))
-            shifted = cv2.warpAffine(image, np.float32([[1, 0, 35], [0, 1, 10]]),
-                                      (image.shape[1], image.shape[0]),
-                                      borderValue=(255, 255, 255))
-            rows = []
-            for index, (pose, frame) in enumerate((('upper', image), ('lower', shifted), ('upper', image))):
-                name = f'capture_{index:03d}_{pose}'
-                folder = base / name
-                folder.mkdir()
-                (folder / 'left.png').write_bytes(cv2.imencode('.png', frame)[1].tobytes())
-                rows.append({'name': name, 'pose': pose, 'left_image': f'{name}/left.png'})
-            manifest = {'complete': True, 'board': self.config,
-                        'camera_frame': 'original_left_camera',
-                        'camera_size_px': [1700, 1300],
-                        'left_serial': 'left', 'right_serial': 'right',
-                        'observations': rows}
-            (base / 'capture_manifest.json').write_text(json.dumps(manifest))
-            stereo = {'K_left': [[1500, 0, 850], [0, 1500, 650], [0, 0, 1]],
-                      'D_left': [0, 0, 0, 0, 0], 'image_size': [1700, 1300],
-                      'left_serial': 'left', 'right_serial': 'right'}
-            stereo_path = base / 'stereo.json'
-            stereo_path.write_text(json.dumps(stereo))
-            result = calibrate(base, stereo_path,
-                               ROOT / 'arm/targets/charuco_7x5_10mm_7mm_config.json')
-            self.assertEqual(result['summary']['upper']['count'], 2)
-            self.assertAlmostEqual(result['summary']['upper']['max_return_translation_mm'], 0, places=2)
-            self.assertGreater(result['summary']['lower']['max_reprojection_rms_px'], 0)
-            self.assertEqual(len(result['observations']), 3)
-            self.assertEqual(result['reference_capture'], 'capture_001_lower')
 
 
 if __name__ == "__main__":

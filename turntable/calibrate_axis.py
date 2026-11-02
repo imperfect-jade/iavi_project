@@ -1,15 +1,92 @@
-"""Estimate a turntable axis in the left-camera frame from four-face ArUco photos."""
+"""Calibrate the rotating axis and stationary board in one coordinate frame."""
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
+import sys
 
 import cv2
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BOARD = ROOT / "turntable/targets/aruco_cube_4faces_config.json"
+DEFAULT_FIXED_BOARD = ROOT / "arm/targets/charuco_7x5_10mm_7mm_config.json"
+sys.path.insert(0, str(ROOT / "arm"))
+from fixed_board import board_from_config, detect_corners_with_contrast_fallback, estimate_pose  # noqa: E402
+
+
+def rotation_difference_deg(a, b):
+    relative = a[:3, :3] @ b[:3, :3].T
+    return float(np.rad2deg(np.arccos(np.clip((np.trace(relative) - 1) / 2, -1, 1))))
+
+
+def fit_stationary_board(image_rows, board, K, D, min_corners=18,
+                         max_rms_px=1.0, min_inliers=6,
+                         max_translation_mm=3.0, max_rotation_deg=0.5):
+    """Estimate one board pose from multiple stationary-board photographs."""
+    candidates, observations = [], []
+    for name, image in image_rows:
+        corners, ids, method = detect_corners_with_contrast_fallback(image, board, min_corners)
+        record = {"image": name, "corners": len(ids), "detection_method": method}
+        if len(ids) < min_corners:
+            record["status"] = "too_few_corners"
+        else:
+            try:
+                pose, rms = estimate_pose(board, corners, ids, K, D)
+                record["reprojection_rms_px"] = rms
+                if np.isfinite(rms) and rms <= max_rms_px:
+                    candidates.append((name, pose))
+                    record["status"] = "candidate"
+                else:
+                    record["status"] = "high_reprojection_error"
+            except (ValueError, cv2.error) as exc:
+                record["status"] = f"pose_failed: {exc}"
+        observations.append(record)
+    if len(candidates) < min_inliers:
+        raise ValueError(f"Stationary fixed board has only {len(candidates)} usable images; "
+                         f"need {min_inliers} with at least {min_corners} corners and "
+                         f"RMS <= {max_rms_px:g} px. Adjust board exposure and recapture.")
+    poses = [row[1] for row in candidates]
+    # A medoid rejects one accurate-looking but geometrically inconsistent PnP result.
+    distances = np.array([[np.linalg.norm(a[:3, 3] - b[:3, 3]) +
+                           100 * np.deg2rad(rotation_difference_deg(a, b))
+                           for b in poses] for a in poses])
+    medoid = poses[int(np.argmin(np.median(distances, axis=1)))]
+    inliers = [(name, pose) for name, pose in candidates
+               if np.linalg.norm(pose[:3, 3] - medoid[:3, 3]) <= max_translation_mm
+               and rotation_difference_deg(pose, medoid) <= max_rotation_deg]
+    if len(inliers) < min_inliers:
+        raise ValueError(f"Stationary board pose is inconsistent across axis images: "
+                         f"{len(inliers)}/{len(candidates)} agree within "
+                         f"{max_translation_mm:g} mm and {max_rotation_deg:g} deg")
+    mean = np.mean([pose[:3, :3] for _, pose in inliers], axis=0)
+    U, _, Vt = np.linalg.svd(mean)
+    rotation = U @ np.diag([1, 1, np.linalg.det(U @ Vt)]) @ Vt
+    consensus = np.eye(4)
+    consensus[:3, :3] = rotation
+    consensus[:3, 3] = np.mean([pose[:3, 3] for _, pose in inliers], axis=0)
+    selected = {name for name, _ in inliers}
+    for row in observations:
+        if row["status"] == "candidate":
+            row["status"] = "inlier" if row["image"] in selected else "pose_outlier"
+    return consensus, {"observations": observations,
+                       "inlier_count": len(inliers),
+                       "max_inlier_translation_mm": float(max(
+                           np.linalg.norm(pose[:3, 3] - consensus[:3, 3])
+                           for _, pose in inliers)),
+                       "max_inlier_rotation_deg": float(max(
+                           rotation_difference_deg(pose, consensus)
+                           for _, pose in inliers))}
+
+
+def axis_in_board_frame(point, direction, T_left_from_board):
+    T_board_from_left = np.linalg.inv(T_left_from_board)
+    axis = T_board_from_left[:3, :3] @ np.asarray(direction, float)
+    axis /= np.linalg.norm(axis)
+    point = T_board_from_left[:3, :3] @ np.asarray(point, float) + T_board_from_left[:3, 3]
+    # Preserve the along-axis origin used by existing height crop settings.
+    return point, axis
 
 
 def default_output_path(images):
@@ -153,8 +230,13 @@ def fit_axis_from_poses(poses):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--images", type=Path, required=True, help="capture_axis.py session directory")
-    p.add_argument("--stereo", type=Path, default=ROOT / "calibration/stereo/stereo_calibration.npz")
+    p.add_argument("--stereo", type=Path,
+                   default=ROOT / "calibration/stereo_pose_lower/stereo_calibration.npz")
     p.add_argument("--board", type=Path, default=DEFAULT_BOARD)
+    p.add_argument("--fixed-board", type=Path, default=DEFAULT_FIXED_BOARD,
+                   help="stationary ChArUco board visible beside the rotating target")
+    p.add_argument("--min-fixed-board-corners", type=int, default=18)
+    p.add_argument("--max-fixed-board-rms-px", type=float, default=1.0)
     p.add_argument("--output", type=Path,
                    help="Default: calibration/turntable_axis/<session-id>/axis_calibration.json")
     p.add_argument("--min-markers", type=int, default=2)
@@ -162,6 +244,8 @@ def main(argv=None):
                    help="Reprocess captured images with a corrected geometry for the same marker IDs")
     args = p.parse_args(argv)
     config = json.loads(args.board.read_text(encoding="utf-8"))
+    fixed_config = json.loads(args.fixed_board.read_text(encoding="utf-8"))
+    fixed_board = board_from_config(fixed_config)
     manifest_path = args.images / "capture_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not manifest.get("complete") or len(manifest.get("angles", [])) != 13:
@@ -176,6 +260,10 @@ def main(argv=None):
             raise ValueError("Capture board differs from calibration board; use --allow-board-geometry-update only for corrected geometry of the same marker IDs")
     if args.min_markers < 1:
         p.error("--min-markers must be positive")
+    if not 4 <= args.min_fixed_board_corners <= 24 or args.max_fixed_board_rms_px <= 0:
+        p.error("Invalid stationary fixed-board quality limits")
+    if manifest.get("fixed_board") != fixed_config:
+        raise ValueError("Axis capture stationary board differs from --fixed-board")
     with np.load(args.stereo) as cal:
         stereo = tuple(cal[key] for key in
                        ("K_left", "D_left", "K_right", "D_right",
@@ -187,7 +275,7 @@ def main(argv=None):
        manifest["right_serial"] != stereo_metadata["right_serial"] or \
        tuple(manifest["camera_size_px"]) != size:
         raise ValueError("Capture camera identity or size is inconsistent with calibration")
-    poses, observations = [], []
+    poses, observations, fixed_board_images = [], [], []
     for angle in range(0, 360, 30):
         folder = args.images / f"angle_{angle:03d}"
         images = [cv2.imread(str(folder / f"{side}.png"), cv2.IMREAD_COLOR)
@@ -196,6 +284,7 @@ def main(argv=None):
             raise ValueError(f"Missing image or size differs from stereo calibration: {folder}")
         R, t, count, fit_rms, left_rms, right_rms = detect_stereo_pose(
             *images, config, stereo, args.min_markers)
+        fixed_board_images.append((f"angle_{angle:03d}/left.png", images[0]))
         poses.append((angle, R, t))
         observations.append({"command_deg": angle, "common_markers": count,
                              "triangulation_fit_rms_mm": fit_rms,
@@ -208,6 +297,7 @@ def main(argv=None):
                      for side in ("left", "right")]
     if any(image is None or (image.shape[1], image.shape[0]) != size for image in return_images):
         raise ValueError(f"Missing or invalid return-to-zero images: {return_folder}")
+    fixed_board_images.append(("angle_000_return/left.png", return_images[0]))
     R_return, t_return, return_count, return_fit, return_left, return_right = detect_stereo_pose(
         *return_images, config, stereo, args.min_markers)
     first_image = cv2.imread(str(args.images / "angle_000" / "left.png"), cv2.IMREAD_COLOR)
@@ -217,12 +307,20 @@ def main(argv=None):
     closure_rot = float(np.rad2deg(np.arccos(np.clip((np.trace(closure_R) - 1) / 2, -1, 1))))
     closure_mm = float(np.linalg.norm(t_return - t_zero))
     fitted = fit_axis_from_poses(poses)
-    result = {"coordinate_frame": "unrectified_left_camera", "unit": "mm",
+    T_left_from_board, fixed_board_fit = fit_stationary_board(
+        fixed_board_images, fixed_board, stereo[0], stereo[1],
+        min_corners=args.min_fixed_board_corners,
+        max_rms_px=args.max_fixed_board_rms_px)
+    board_point, board_direction = axis_in_board_frame(
+        fitted["axis_point_mm"], fitted["axis_direction"], T_left_from_board)
+    result = {"coordinate_frame": "fixed_ChArUco_board", "unit": "mm",
               "pose_method": "stereo_triangulated_marker_corners_and_rigid_fit",
               "board_geometry_updated_after_capture": board_updated,
-              "axis_point_mm": fitted["axis_point_mm"].tolist(),
-              "axis_direction": fitted["axis_direction"].tolist(),
-              "axis_point_definition": "point on axis closest to left camera origin",
+              "axis_point_mm": board_point.tolist(),
+              "axis_direction": board_direction.tolist(),
+              "axis_point_definition": "camera-nearest axis point transformed into fixed-board coordinates",
+              "axis_point_original_left_camera_mm": fitted["axis_point_mm"].tolist(),
+              "axis_direction_original_left_camera": fitted["axis_direction"].tolist(),
               "point_rms_mm": fitted["point_rms_mm"],
               "angles": fitted["angles"], "observations": observations,
               "return_to_zero": {"markers": return_count,
@@ -233,12 +331,18 @@ def main(argv=None):
                                  "left_corner_shift_rms_px": shift_rms,
                                  "rotation_error_deg": closure_rot,
                                  "translation_error_mm": closure_mm},
-              "board": config, "stereo_calibration": str(args.stereo.resolve()),
+              "board": config, "fixed_board": fixed_config,
+              "fixed_board_calibration": {**fixed_board_fit,
+                                          "T_left_from_board": T_left_from_board.tolist()},
+              "stereo_calibration": str(args.stereo.resolve()),
               "warning": "Single-face orientation can remain noisy even with stereo; compare return image corner shift as well as pose errors before fusion."}
     output = args.output or default_output_path(args.images)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(f"Axis RMS {result['point_rms_mm']:.3f} mm -> {output}")
+    print(f"Axis RMS {result['point_rms_mm']:.3f} mm; stationary board "
+          f"{fixed_board_fit['inlier_count']}/{len(fixed_board_images)} pose inliers, "
+          f"max translation {fixed_board_fit['max_inlier_translation_mm']:.2f} mm / "
+          f"rotation {fixed_board_fit['max_inlier_rotation_deg']:.2f} deg -> {output}")
     return 0
 
 

@@ -15,6 +15,9 @@ sys.path.insert(0, str(ROOT / "code"))
 from capture import (DEFAULT_LEFT_SERIAL, DEFAULT_RIGHT_SERIAL, close_cameras,
                      grab_pair, open_cameras)
 from calibrate_axis import DEFAULT_BOARD
+from calibrate_axis import DEFAULT_FIXED_BOARD
+sys.path.insert(0, str(ROOT / "arm"))
+from fixed_board import board_from_config, detect_corners_with_contrast_fallback  # noqa: E402
 from turntable import ANGLE_TO_PWM, SETTLE_WAIT_S, open_controller
 
 
@@ -32,6 +35,9 @@ def main(argv=None):
     p.add_argument("--session-id", required=True)
     p.add_argument("--output-root", type=Path, default=ROOT / "raw/turntable_axis")
     p.add_argument("--board", type=Path, default=DEFAULT_BOARD)
+    p.add_argument("--fixed-board", type=Path, default=DEFAULT_FIXED_BOARD,
+                   help="stationary ChArUco board outside the rotating platform")
+    p.add_argument("--min-fixed-board-corners", type=int, default=18)
     p.add_argument("--left-serial", default=DEFAULT_LEFT_SERIAL)
     p.add_argument("--right-serial", default=DEFAULT_RIGHT_SERIAL)
     p.add_argument("--exposure-us", type=float, default=10000)
@@ -46,11 +52,14 @@ def main(argv=None):
     args = p.parse_args(argv)
     if not args.session_id or not all(c.isalnum() or c in "_-" for c in args.session_id):
         p.error("session-id must contain only letters, digits, _ or -")
-    if args.settle_s < 0 or args.return_settle_s < 0 or args.retries < 1 or args.min_markers < 1:
+    if args.settle_s < 0 or args.return_settle_s < 0 or args.retries < 1 or \
+       args.min_markers < 1 or not 4 <= args.min_fixed_board_corners <= 24:
         p.error("Invalid settle, retries, or minimum markers")
     config = json.loads(args.board.read_text(encoding="utf-8"))
     if config.get("target_type") != "four_face_aruco_cuboid":
         p.error("--board must be a measured four-face cuboid config")
+    fixed_config = json.loads(args.fixed_board.read_text(encoding="utf-8"))
+    fixed_board = board_from_config(fixed_config)
     target = args.output_root / args.session_id
     target.mkdir(parents=True, exist_ok=False)
     cameras = controller = None
@@ -69,13 +78,18 @@ def main(argv=None):
                                                 args.timeout_ms, args.trigger)
                 left_ids, right_ids = detect_ids(left, config), detect_ids(right, config)
                 common_ids = left_ids & right_ids
-                if len(common_ids) >= args.min_markers:
+                _, fixed_ids, fixed_method = detect_corners_with_contrast_fallback(
+                    left, fixed_board, args.min_fixed_board_corners)
+                if len(common_ids) >= args.min_markers and \
+                   len(fixed_ids) >= args.min_fixed_board_corners:
                     break
                 print(f"  attempt {attempt}: markers left={len(left_ids)}, "
-                      f"right={len(right_ids)}, common={len(common_ids)}", flush=True)
+                      f"right={len(right_ids)}, common={len(common_ids)}, "
+                      f"fixed-board corners={len(fixed_ids)}", flush=True)
                 time.sleep(0.3)
             else:
-                raise RuntimeError(f"Board not visible at {angle} deg; adjust lighting/focus and use a new session")
+                raise RuntimeError(f"Rotating target or stationary fixed board is not visible "
+                                   f"at {angle} deg; adjust exposure/lighting and use a new session")
             folder = target / ("angle_000_return" if returned else f"angle_{angle:03d}")
             folder.mkdir()
             for name, image in (("left", left), ("right", right)):
@@ -89,14 +103,17 @@ def main(argv=None):
                          "serial_command": command.decode("ascii"),
                          "left_markers": len(left_ids), "right_markers": len(right_ids),
                          "common_markers": len(common_ids),
+                         "fixed_board_corners_left": len(fixed_ids),
+                         "fixed_board_detection_method": fixed_method,
                          "left_ids": sorted(left_ids), "right_ids": sorted(right_ids),
                          "device_ticks": stamps, "captured_at": datetime.now().astimezone().isoformat()})
-            print(f"  saved left/right PNG; markers left/right/common "
-                  f"{len(left_ids)}/{len(right_ids)}/{len(common_ids)}", flush=True)
+            print(f"  saved left/right PNG; rotating markers left/right/common "
+                  f"{len(left_ids)}/{len(right_ids)}/{len(common_ids)}, "
+                  f"stationary board corners={len(fixed_ids)}", flush=True)
         manifest = {"complete": True, "camera_frame": "original_left_camera",
                     "camera_size_px": size, "left_serial": args.left_serial,
                     "right_serial": args.right_serial, "port": args.port,
-                    "board": config, "angles": rows,
+                    "board": config, "fixed_board": fixed_config, "angles": rows,
                     "arrival_verified": False,
                     "note": "Serial write and settle delay do not verify physical arrival."
                     }

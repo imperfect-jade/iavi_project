@@ -281,7 +281,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session-root", type=Path, required=True)
     parser.add_argument("--stereo", type=Path,
-                        default=ROOT / "calibration/stereo/stereo_calibration.npz")
+                        default=ROOT / "calibration/stereo_pose_lower/stereo_calibration.npz")
     parser.add_argument("--board", type=Path,
                         default=ROOT / "arm/targets/charuco_7x5_10mm_7mm_config.json")
     parser.add_argument("--output", type=Path)

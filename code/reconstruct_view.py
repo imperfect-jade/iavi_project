@@ -188,6 +188,11 @@ def load_run(directory, calibration):
         if not isinstance(count, int) or not 1 <= count <= 32:
             raise ValueError("Invalid dense-dot frame count")
         expected = [f"dense_dots_{index:02d}" for index in range(count)] + ["white"]
+    elif protocol == "dense_dots_v3":
+        count = manifest.get("dot_frames")
+        if not isinstance(count, int) or not 1 <= count <= 32:
+            raise ValueError("Invalid dense-dot frame count")
+        expected = ["black"] + [f"dense_dots_{index:02d}" for index in range(count)] + ["white"]
     else:
         raise ValueError("Unsupported protocol")
     frames = manifest["frames"]
@@ -209,10 +214,21 @@ def load_run(directory, calibration):
     return manifest, frames
 
 
+def default_pose_calibration(view):
+    """Choose the stereo model recorded for this arm pose."""
+    manifest = json.loads((Path(view) / "manifest.json").read_text(encoding="utf-8"))
+    pose_id = manifest.get("arm_pose_id")
+    if pose_id not in (0, 1):
+        raise ValueError("Scan manifest requires arm_pose_id 0 (upper) or 1 (lower)")
+    name = "stereo_pose_upper" if pose_id == 0 else "stereo_pose_lower"
+    return ROOT / "calibration" / name / "stereo_calibration.npz"
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--view", type=Path, required=True, help="raw/.../view_NNN/repeat_NNN")
-    p.add_argument("--calibration", type=Path, default=ROOT / "calibration/stereo/stereo_calibration.npz")
+    p.add_argument("--calibration", type=Path,
+                   help="override the calibration selected by the view's arm_pose_id")
     p.add_argument("--output", type=Path, help="processed/.../view_NNN/repeat_NNN; defaults from --view")
     p.add_argument("--scale", type=float, choices=(.5, 1.0), default=.5)
     p.add_argument("--min-depth-mm", type=float, help="manual lower depth bound; requires --max-depth-mm")
@@ -227,6 +243,7 @@ def main(argv=None):
         p.error("Depth range and point stride invalid")
     if args.sgbm_block_size < 3 or args.sgbm_block_size % 2 != 1:
         p.error("--sgbm-block-size must be odd and at least 3")
+    args.calibration = args.calibration or default_pose_calibration(args.view)
     with np.load(args.calibration) as archive:
         calibration = {key: archive[key].copy() for key in archive.files}
     metadata = json.loads(args.calibration.with_suffix(".json").read_text(encoding="utf-8"))
@@ -243,7 +260,7 @@ def main(argv=None):
     q = q_for_scale(calibration["Q"], args.scale)
     def disparity_at(z):
         return (q[2, 3]/z-q[3, 3])/q[3, 2]
-    dot_frames = frames[:-1]
+    dot_frames = frames[1:-1] if manifest["protocol"] == "dense_dots_v3" else frames[:-1]
     image_pair = None
     if args.min_depth_mm is None:
         estimated = []

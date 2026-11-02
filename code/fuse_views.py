@@ -1,4 +1,4 @@
-"""Fuse turntable views into the zero-angle lower-pose reference frame (millimetres).
+"""Fuse turntable views into a shared zero-angle reference frame (millimetres).
 
 This first-stage fusion requires an object crop. For different camera poses,
 provide measured camera-to-reference transforms with --camera-poses.
@@ -84,10 +84,11 @@ def transform_axis(point, direction, transform):
 
 
 def load_axis_calibration(path):
-    """Read the measured axis in the original left-camera coordinate frame."""
+    """Read a measured axis in either camera or stationary-board coordinates."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    if data.get("unit") != "mm" or data.get("coordinate_frame") != "unrectified_left_camera":
-        raise ValueError("Axis calibration must use mm in unrectified_left_camera")
+    frame = data.get("coordinate_frame")
+    if data.get("unit") != "mm" or frame not in ("unrectified_left_camera", "fixed_ChArUco_board"):
+        raise ValueError("Axis calibration must use mm in unrectified_left_camera or fixed_ChArUco_board")
     point = np.asarray(data["axis_point_mm"], np.float64)
     direction = np.asarray(data["axis_direction"], np.float64)
     if point.shape != (3,) or direction.shape != (3,) or not np.isfinite(point).all() or \
@@ -102,10 +103,46 @@ def load_axis_calibration(path):
     if not data.get("stereo_calibration"):
         raise ValueError("Axis calibration does not identify its stereo calibration")
     return {"point": point, "direction": direction / np.linalg.norm(direction),
-            "angles_by_command": angles, "frame": "original_left_camera",
+            "angles_by_command": angles,
+            "frame": "original_left_camera" if frame == "unrectified_left_camera" else frame,
+            "fixed_board": data.get("fixed_board"),
             "stereo_calibration": Path(data["stereo_calibration"]).resolve(),
             "point_rms_mm": data.get("point_rms_mm"),
             "return_to_zero": data.get("return_to_zero")}
+
+
+def validate_stereo_compatibility(calibrations, axis_cal, has_board_poses):
+    """Allow pose-specific stereo rotations only in one metric board frame."""
+    scan_paths = {Path(path).resolve() for path in calibrations}
+    axis_path = axis_cal["stereo_calibration"] if axis_cal else None
+    if len(scan_paths) == 1 and (axis_path is None or axis_path in scan_paths):
+        return
+    if not axis_cal or axis_cal["frame"] != "fixed_ChArUco_board" or not has_board_poses:
+        raise ValueError("Different stereo calibrations require fixed-board axis and camera poses")
+    paths = sorted(scan_paths | {axis_path})
+    reference = None
+    for path in paths:
+        with np.load(path) as archive:
+            data = {key: archive[key].copy() for key in
+                    ("image_size", "K_left", "D_left", "K_right", "D_right",
+                     "t_right_from_left_mm")}
+        metadata = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+        identity = (metadata["left_serial"], metadata["right_serial"],
+                    tuple(metadata["image_size"]))
+        baseline = float(np.linalg.norm(data["t_right_from_left_mm"]))
+        if not np.isfinite(baseline) or baseline <= 0:
+            raise ValueError(f"Invalid stereo baseline: {path}")
+        if reference is None:
+            reference = (data, identity, baseline)
+            continue
+        first, first_identity, first_baseline = reference
+        if identity != first_identity or not np.array_equal(data["image_size"], first["image_size"]):
+            raise ValueError("Pose-specific stereo camera identities or sizes differ")
+        if any(not np.allclose(data[key], first[key], rtol=0, atol=1e-8)
+               for key in ("K_left", "D_left", "K_right", "D_right")):
+            raise ValueError("Pose-specific stereo intrinsics differ")
+        if not np.isclose(baseline, first_baseline, rtol=1e-3, atol=1e-4):
+            raise ValueError("Pose-specific stereo baseline lengths differ")
 
 
 def main(argv=None):
@@ -131,7 +168,7 @@ def main(argv=None):
     p.add_argument("--height-mm", type=float, nargs=2, default=(-20, 110),
                    metavar=("MIN", "MAX"), help="axis-coordinate crop in mm (default -20 110)")
     p.add_argument("--axis-point-mm", type=float, nargs=3,
-                   help="measured turntable axis point in reference camera frame; default estimates center from crops")
+                   help="measured turntable axis point in the camera-pose reference frame")
     p.add_argument("--axis-calibration", type=Path,
                    help=f"turntable/calibrate_axis.py JSON (default: {DEFAULT_AXIS_CALIBRATION})")
     p.add_argument("--axis-direction", type=float, nargs=3, default=(0, 1, 0),
@@ -155,6 +192,11 @@ def main(argv=None):
                       tuple(args.axis_direction) != (0, 1, 0)):
         p.error("--axis-calibration supplies the axis and angle sign; omit --axis-point-mm and --angle-sign")
     axis_cal = load_axis_calibration(axis_path) if axis_path else None
+    if axis_cal and axis_cal["frame"] == "fixed_ChArUco_board":
+        if not args.axis_already_in_reference:
+            p.error("Fixed-board axis requires --axis-already-in-reference and board-frame camera poses")
+        if args.axis_to_reference:
+            p.error("Fixed-board axis must not use --axis-to-reference")
     if not axis_cal and (args.axis_to_reference or args.axis_already_in_reference):
         p.error("Axis frame options require --axis-calibration")
     if not axis_cal and args.bounds_mm is None:
@@ -168,9 +210,12 @@ def main(argv=None):
         p.error("Axis direction must be finite and nonzero")
     poses_path = args.camera_poses or (args.session_root / "camera_poses.json" if args.session_root and
                                         (args.session_root / "camera_poses.json").is_file() else None)
+    if axis_cal and axis_cal["frame"] == "fixed_ChArUco_board" and not poses_path:
+        p.error("Fixed-board axis requires --camera-poses in the fixed-board frame")
     poses = json.loads(poses_path.read_text(encoding="utf-8")) if poses_path else {}
     axis_transform = None
-    axis_transform_status = None
+    axis_transform_status = "fixed_board_direct" if axis_cal and \
+        axis_cal["frame"] == "fixed_ChArUco_board" else None
     if args.axis_to_reference:
         raw_transform = json.loads(args.axis_to_reference.read_text(encoding="utf-8"))
         axis_transform_status = raw_transform.get("status") if isinstance(raw_transform, dict) else None
@@ -224,8 +269,6 @@ def main(argv=None):
         command_angle = float(pose["turntable_deg_commanded"])
         if axis_cal and command_angle not in axis_cal["angles_by_command"]:
             raise ValueError(f"No calibrated angle for {command_angle:g} deg: {name}")
-        if axis_cal and Path(qc["calibration"]).resolve() != axis_cal["stereo_calibration"]:
-            raise ValueError(f"Axis and cloud use different stereo calibrations: {name}")
         scans.append({"name": name, "command_angle": command_angle,
                       "angle": axis_cal["angles_by_command"][command_angle] if axis_cal else command_angle,
                       "arm": pose["arm_pose_id"], "calibration": qc["calibration"],
@@ -240,8 +283,8 @@ def main(argv=None):
         raise ValueError("Different arm poses require --camera-poses")
     if multiple_poses and axis_cal and not (args.axis_already_in_reference or axis_transform is not None):
         raise ValueError("Two-pose fusion requires --axis-already-in-reference or --axis-to-reference")
-    if len({row["calibration"] for row in scans}) > 1:
-        raise ValueError("Reconstructed views use different stereo calibrations")
+    validate_stereo_compatibility([row["calibration"] for row in scans],
+                                  axis_cal, bool(poses_path))
     for row in scans:
         if poses_path and row["name"] not in poses:
             raise ValueError(f"Missing camera transform: {row['name']}")
@@ -294,10 +337,16 @@ def main(argv=None):
     for stale in (output / "aligned").glob("*.ply"):
         if stale.name not in aligned_names:
             stale.unlink()
-    report = {"coordinate_frame": output_frame, "reference_camera_pose": "first_lower_pose_left_camera" if poses_path else "input_left_camera",
+    reference_frame = ("fixed_ChArUco_board" if axis_cal and
+                       axis_cal["frame"] == "fixed_ChArUco_board" else
+                       "first_lower_pose_left_camera" if poses_path else "input_left_camera")
+    report = {"coordinate_frame": output_frame,
+              "reference_frame": reference_frame,
+              "reference_camera_pose": reference_frame,
               "selected_arm_pose_id": args.arm_pose_id,
               "unit": "mm", "sources": [str(root) for root in roots],
               "selected_repeats": [str(path.parent) for _, path in repeats],
+              "stereo_calibrations_by_view": {row["name"]: row["calibration"] for row in scans},
               "axis_point_mm": center.tolist(), "axis_direction": (axis/np.linalg.norm(axis)).tolist(),
               "axis_source": axis_source, "axis_calibration": str(axis_path.resolve()) if axis_cal else None,
               "camera_poses": str(poses_path.resolve()) if poses_path else None,

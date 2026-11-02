@@ -7,11 +7,41 @@ import json
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
-from fuse_views import DEFAULT_AXIS_CALIBRATION, main, read_ply, rotate_about_axis, voxel_average, load_axis_calibration, crop_cylinder, transform_axis, validate_rigid_transform
+from fuse_views import DEFAULT_AXIS_CALIBRATION, main, read_ply, rotate_about_axis, voxel_average, load_axis_calibration, crop_cylinder, transform_axis, validate_rigid_transform, validate_stereo_compatibility
 from reconstruct_view import write_ply
 
 
 class FuseViewsTests(unittest.TestCase):
+    def test_fixed_board_fusion_accepts_pose_specific_extrinsics_with_shared_intrinsics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = [root / "lower.npz", root / "upper.npz"]
+            for index, path in enumerate(paths):
+                np.savez(path, image_size=np.array([2592, 1944]),
+                         K_left=np.eye(3), D_left=np.zeros((1, 5)),
+                         K_right=np.eye(3), D_right=np.zeros((1, 5)),
+                         t_right_from_left_mm=np.array([[-100.], [0.], [0.]]),
+                         R_right_from_left=np.eye(3) if index == 0 else
+                             np.array([[1., 0., 0.], [0., .999, -.045],
+                                       [0., .045, .999]]))
+                path.with_suffix(".json").write_text(json.dumps({
+                    "left_serial": "L", "right_serial": "R",
+                    "image_size": [2592, 1944]}), encoding="utf-8")
+            axis = {"frame": "fixed_ChArUco_board",
+                    "stereo_calibration": paths[0].resolve()}
+            validate_stereo_compatibility(paths, axis, True)
+            with self.assertRaisesRegex(ValueError, "fixed-board"):
+                validate_stereo_compatibility(paths, axis, False)
+            with self.assertRaisesRegex(ValueError, "fixed-board"):
+                validate_stereo_compatibility(paths, {**axis,
+                    "frame": "original_left_camera"}, True)
+            np.savez(paths[1], image_size=np.array([2592, 1944]),
+                     K_left=2 * np.eye(3), D_left=np.zeros((1, 5)),
+                     K_right=np.eye(3), D_right=np.zeros((1, 5)),
+                     t_right_from_left_mm=np.array([[-100.], [0.], [0.]]))
+            with self.assertRaisesRegex(ValueError, "intrinsics"):
+                validate_stereo_compatibility(paths, axis, True)
+
     def test_explicit_repeats_use_custom_raw_root_and_ignore_old_repeat(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

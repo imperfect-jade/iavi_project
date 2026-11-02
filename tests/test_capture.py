@@ -5,27 +5,54 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
-from capture import make_dense_dots, reserve_view, save_pair, finish_scan, select_projector_display, parser, save_manual_pair, next_manual_index, configure_camera, record_capture_session
+from capture import capture_once, make_dense_dots, reserve_view, save_pair, finish_scan, select_projector_display, parser, save_manual_pair, next_manual_index, configure_camera, record_capture_session
 
 
 class CaptureTests(unittest.TestCase):
-    def test_dense_dots_protocol_is_reproducible_and_has_white_frame(self):
+    def test_dense_dots_protocol_has_black_board_frame_and_white_color_frame(self):
         a = make_dense_dots(80, 40, 8, 5, 3)
         b = make_dense_dots(80, 40, 8, 5, 3)
-        self.assertEqual([p.name for p in a], ["dense_dots_00", "dense_dots_01", "dense_dots_02", "white"])
+        self.assertEqual([p.name for p in a], ["black", "dense_dots_00", "dense_dots_01", "dense_dots_02", "white"])
         self.assertTrue(np.array_equal(a[0].image, b[0].image))
-        self.assertFalse(np.array_equal(a[0].image, a[1].image))
-        self.assertGreater(np.count_nonzero(a[0].image), 0)
+        self.assertEqual(np.count_nonzero(a[0].image), 0)
+        self.assertFalse(np.array_equal(a[1].image, a[2].image))
+        self.assertGreater(np.count_nonzero(a[1].image), 0)
+        self.assertTrue(np.all(a[-1].image == 255))
         self.assertEqual(parser().parse_args(["scan", "--scan-protocol", "dense_dots"]).scan_protocol,
                          "dense_dots")
         self.assertEqual(parser().parse_args(["scan", "--scan-protocol", "dense_dots"]).dot_frames, 5)
         self.assertEqual(parser().parse_args(["scan"]).scan_protocol, "dense_dots")
         with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
             parser().parse_args(["scan", "--scan-protocol", "gray_phase"])
+
+    def test_black_capture_is_passed_to_board_localization_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "left").mkdir()
+            (root / "right").mkdir()
+            protocol = make_dense_dots(16, 16, 8, 5, 1)
+            image = np.zeros((16, 16, 3), np.uint8)
+            stamps = {"left": 1, "right": 2}
+            board_rows = []
+            def on_black(left, right, ticks, row):
+                board_rows.append(row["pattern"])
+                np.testing.assert_array_equal(left, image)
+                self.assertEqual(ticks, stamps)
+            with patch("capture.show_pattern"), patch("capture.grab_pair",
+                 return_value=(image, image, stamps)), patch("capture.cv2.waitKey", return_value=-1), \
+                 patch("capture.cv2.imshow"), patch("capture.preview_pair", return_value=image):
+                capture_once({"destination": root, "metadata": {"protocol": "dense_dots_v3"},
+                              "on_black": on_black},
+                             (None, None, None, None, 1, 1000), protocol)
+            manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(board_rows, ["black"])
+            self.assertEqual([row["pattern"] for row in manifest["frames"]],
+                             ["black", "dense_dots_00", "white"])
 
     def test_session_rejects_changed_camera_settings(self):
         class Node:

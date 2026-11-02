@@ -8,18 +8,20 @@
 
 `turntable/targets/aruco_cube_4faces_A4.pdf` 是按上述实测布局重新生成的备用打印图，A4 原尺寸／100% 打印，关闭“适合纸张”缩放。已贴好的方柱不需要重印。四张面板依次标为 FACE 0～3，每面两个标记；裁切线外的标签不要贴到方柱上。方柱底面刚性固定于转盘，旋转时不得晃动。
 
-移开物体，保持相机与转盘位置固定，关闭结构光投影并使用均匀照明。在 0°、30°、…、330°拍摄后返回 0°再拍一次。默认要求每张左右相机**共同识别**至少两个已知 ID。先在 0°、90°、180°、270°试拍，确认四面标记可见；如果某角度不能稳定识别，先调整实物与照明，不建议降低验收条件来凑数据。
+移开物体，固定 ChArUco 板放在转台外侧并保持静止；转动的四面 ArUco 方柱与固定板须在同一张左相机图像中清晰可见。保持相机与转盘位置固定，关闭结构光投影并调整均匀照明，避免固定板过曝。在 0°、30°、…、330°拍摄后返回 0°再拍一次。默认要求每张左右相机**共同识别**至少两个方柱标记，左相机同时识别至少 18 个固定板角点；采集时不满足就重试，仍失败则停止。先在 0°、90°、180°、270°试拍，确认两种图案均可见。
 
 在项目目录运行：
 
 ```powershell
-python turntable\capture_axis.py --port COM6 --session-id axis_cube_01
-python turntable\calibrate_axis.py --images raw\turntable_axis\axis_cube_01
+python turntable\capture_axis.py --port COM6 --session-id axis_cube_new
+python turntable\calibrate_axis.py --images raw\turntable_axis\axis_cube_new
 ```
+
+第二条命令默认使用 `calibration/stereo_pose_lower/stereo_calibration.npz`，因此转轴照片应在机械臂下位姿拍摄。物体扫描完成后，`system/scan_session.py` 会用这份下位姿双目标定重新计算板坐标系中的转轴，结果保存在该物体的 `processed/fused/.../fusion_calibration/axis_calibration.json`，以此结果用于融合。采集曝光可通过 `--exposure-us` 调整；先检查固定板没有大片纯白饱和区域。
 
 常规角度默认等待 2.5 秒，最后从 330° 返回 0° 的 `angle_000_return` 单独等待 12 秒。若实测回零还未停稳，可在新拍摄会话中增加 `--return-settle-s 20`；`--settle-s` 只调整常规角度。实际等待秒数记录在 `capture_manifest.json` 的每个角度条目中。等待时间仍不等于到位反馈，拍摄时请观察回零是否完全停止。
 
-原始照片和 `capture_manifest.json` 写入 `raw/turntable_axis/<session-id>/`，已存在会话不会覆盖。标定结果默认写入 `calibration/turntable_axis/<session-id>/axis_calibration.json`；可用 `--output` 指定其他结果文件。标定使用左右相机原图和现有双目内外参，对共同可见的标记角点进行三角化，再把其三维位置与同一方柱模型刚性配准，拟合转轴和实际角度。结果输出轴点、轴方向、逐图双目重投影误差、三维配准残差、转轴拟合残差，以及回零图像的角点位移和位姿差。单面近正视时，位姿角度可能仍不稳定；应结合回零图像的角点位移判断。轴点在原始左相机坐标系中，单位毫米。观察结果与实物相符后才能用于点云融合；不同机械臂位姿需分别标定或转换到共同坐标系。
+原始照片和 `capture_manifest.json` 写入 `raw/turntable_axis/<session-id>/`，已存在会话不会覆盖。标定结果默认写入 `calibration/turntable_axis/<session-id>/axis_calibration.json`；可用 `--output` 指定其他结果文件。标定使用左右相机原图和现有双目内外参，对共同可见的方柱标记角点进行三角化，拟合转轴和实际角度。同时从至少 6 张照片估计静止 ChArUco 板位姿，剔除不一致结果，并把转轴变换到固定板坐标系。结果输出板坐标系下的轴点、轴方向、逐图配准残差和回零误差，也保留相机坐标系下的原始轴数据供核查。固定板须在后续物体扫描期间与转台保持相同的相对位置；机械臂可移动，每个扫描视角会重新通过固定板定位。
 
 若拍摄后又修正了同一套标记的几何配置，可以保留旧结果并显式指定新文件名重算：
 

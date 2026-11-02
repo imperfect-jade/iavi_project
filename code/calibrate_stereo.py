@@ -1,4 +1,4 @@
-"""Calibrate and independently validate the rigid Basler stereo pair."""
+"""Calibrate lower or upper arm-pose stereo geometry from checkerboard pairs."""
 from __future__ import annotations
 import argparse
 import csv
@@ -275,30 +275,64 @@ def fit_stereo(records, size, obj, distortion_model="standard5", alpha=0.0):
 
 def build_parser():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--train", type=Path, default=ROOT / "raw/calibration/session_01")
-    p.add_argument("--validation", type=Path, required=True,
-                   help="independent board pairs; must be a separate directory")
-    p.add_argument("--output", type=Path, default=ROOT / "calibration/stereo")
+    p.add_argument("--pose", choices=("lower", "upper"), required=True,
+                   help="lower fits camera intrinsics and stereo pose; upper fits stereo pose with lower intrinsics fixed")
+    p.add_argument("--train", type=Path,
+                   help="checkerboard pairs for the selected arm pose")
+    p.add_argument("--validation", type=Path,
+                   help="independent checkerboard pairs, required for both poses")
+    p.add_argument("--output", type=Path,
+                   help="result directory; defaults to calibration/stereo_pose_<pose>")
+    p.add_argument("--lower-calibration", type=Path,
+                   default=ROOT / "calibration/stereo_pose_lower/stereo_calibration.npz",
+                   help="lower stereo NPZ used to fit upper pose")
     p.add_argument("--square-mm", type=float, required=True,
                    help="measured horizontal square size in millimetres; required for correct 3D scale")
     p.add_argument("--square-y-mm", type=float, help="measured vertical square size; defaults to --square-mm")
     p.add_argument("--distortion-model", choices=("radial2", "standard5"), default="standard5",
                    help="lens distortion model; standard5 estimates k1, k2, p1, p2, k3 (default)")
     p.add_argument("--alpha", type=float, default=0.0,
-                   help="Lab5 stereoRectify crop parameter: 0=crop, 1=retain all")
+                   help="lower pose rectification crop: 0=crop, 1=retain all")
     p.add_argument("--left-serial", default="40031431")
     p.add_argument("--right-serial", default="40031435")
     p.add_argument("--max-validation-epipolar-px", type=float, default=2.0,
-                   help="maximum held-out per-image median |dy|; p95 must be <= 1.5 times this")
-    p.add_argument("--exclude", default="", help="comma-separated TRAIN pair numbers, e.g. 3,17; applied after all-pair report")
+                   help="lower pose independent validation limit for per-image median |dy|; p95 <= 1.5 times this")
+    p.add_argument("--exclude", default="", help="lower pose training pair numbers, e.g. 3,17")
     p.add_argument("--no-auto-exclude", action="store_false", dest="auto_exclude",
                    help="report suspicious training pairs without automatically excluding them")
     return p
 
 
+def calibration_options(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.validation is None:
+        parser.error(f"--pose {args.pose} requires --validation")
+    if args.train is None:
+        session = "session_01" if args.pose == "lower" else "session_02"
+        args.train = ROOT / "raw" / "calibration" / session
+    if args.train.resolve() == args.validation.resolve():
+        parser.error("Train and validation directories must differ")
+    if args.output is None:
+        args.output = ROOT / "calibration" / f"stereo_pose_{args.pose}"
+    other_pose = "upper" if args.pose == "lower" else "lower"
+    if args.output.resolve() == (ROOT / "calibration" / f"stereo_pose_{other_pose}").resolve():
+        parser.error("--output cannot overwrite the other pose's calibration directory")
+    if args.pose == "upper" and args.output.resolve() == args.lower_calibration.parent.resolve():
+        parser.error("Upper output must differ from the lower calibration directory")
+    return args
+
+
+def run_upper_pose(args):
+    from upper_stereo_fit import calibrate_upper
+    return calibrate_upper(args)
+
+
 def main(argv=None):
     p = build_parser()
-    args = p.parse_args(argv)
+    args = calibration_options(argv)
+    if args.pose == "upper":
+        return run_upper_pose(args)
     if args.train.resolve() == args.validation.resolve():
         p.error("Train and validation directories must differ")
     if not 0 <= args.alpha <= 1:

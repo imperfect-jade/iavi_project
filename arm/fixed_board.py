@@ -1,4 +1,4 @@
-"""ChArUco detection and pose math for the fixed two-pose calibration board.
+"""ChArUco detection and pose math for the stationary reference board.
 
 Coordinates and translations use millimetres. T_L_W maps board coordinates to
 the original (unrectified) left-camera coordinates.

@@ -9,6 +9,9 @@ from pathlib import Path
 import sys
 import time
 
+import cv2
+import numpy as np
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "code"))
 sys.path.insert(0, str(ROOT / "turntable"))
@@ -16,7 +19,7 @@ sys.path.insert(0, str(ROOT / "arm"))
 from turntable import ANGLE_TO_PWM, SETTLE_WAIT_S, open_controller
 from arm import open_controller as open_arm_controller
 from fixed_board import (board_from_config, detect_corners_with_contrast_fallback,
-                         estimate_pose, relative_transform)
+                         estimate_pose)
 
 
 def angles_for_range(start: int, end: int, step: int) -> list[int]:
@@ -71,7 +74,7 @@ def is_complete_view(folder: Path, view_id: int, arm_pose_id: int, angle: int) -
                 manifest.get("complete") and manifest.get("view_id") == view_id and
                 manifest.get("arm_pose_id") == arm_pose_id and
                 manifest.get("turntable_deg_commanded") == angle and
-                manifest.get("protocol") == "dense_dots_v2" and
+                manifest.get("protocol") in ("dense_dots_v2", "dense_dots_v3") and
                 (folder / "localization" / "left.png").is_file() and
                 (folder / "localization" / "right.png").is_file() and
                 (folder / "localization.json").is_file())
@@ -93,33 +96,50 @@ def selected_complete_sources(session_root: Path, pose_ids: list[int],
     return selected
 
 
-def prepare_reconstruction_calibration(session_root: Path, processed_root: Path,
-                                       pose_ids: list[int], angles: list[int],
-                                       base_calibration: Path, board: Path,
-                                       enabled: bool = True) -> Path:
-    """Validate a session board fit before allowing its views to reconstruct."""
-    if not enabled:
-        return base_calibration
-    from board_stereo_correction import derive_session_calibration
-    sources = selected_complete_sources(session_root, pose_ids, angles)
-    return derive_session_calibration(sources, base_calibration, board,
-                                      processed_root / "board_stereo_correction")
+def load_pose_calibrations(upper_json: Path, lower_json: Path,
+                           camera_serials: tuple[str, str]):
+    """Load the two compatible pose models and their shared left intrinsics."""
+    from fuse_views import validate_stereo_compatibility
+
+    calibrations = {0: Path(upper_json).with_suffix(".npz").resolve(),
+                    1: Path(lower_json).with_suffix(".npz").resolve()}
+    if calibrations[0] == calibrations[1]:
+        raise ValueError("Upper and lower poses require separate stereo calibrations")
+    validate_stereo_compatibility(calibrations.values(),
+        {"frame": "fixed_ChArUco_board", "stereo_calibration": calibrations[1]}, True)
+    upper_metadata = json.loads(calibrations[0].with_suffix(".json").read_text(encoding="utf-8"))
+    lower_hash = hashlib.sha256(calibrations[1].read_bytes()).hexdigest()
+    if upper_metadata.get("lower_sha256") != lower_hash:
+        raise ValueError("Lower calibration changed; rerun upper pose calibration")
+    metadata = json.loads(calibrations[1].with_suffix(".json").read_text(encoding="utf-8"))
+    if camera_serials != (metadata["left_serial"], metadata["right_serial"]):
+        raise ValueError("Camera serials differ from pose stereo calibrations")
+    with np.load(calibrations[1]) as archive:
+        K = archive["K_left"].copy()
+        D = archive["D_left"].copy()
+        size = tuple(int(v) for v in archive["image_size"])
+    return calibrations, K, D, size
 
 
 def reconstruct_session(session_root: Path, processed_root: Path, pose_ids: list[int],
-                        angles: list[int], calibration: Path, reconstruct,
+                        angles: list[int], calibrations: dict[int, Path], reconstruct,
                         min_depth_mm: float | None = None,
                         max_depth_mm: float | None = None) -> int:
     """Run reconstruction after capture; preserve each view's result for retry."""
     from capture import _write_json
 
     processed_root.mkdir(parents=True, exist_ok=True)
-    calibration = calibration.resolve()
-    calibration_hash = hashlib.sha256(calibration.read_bytes()).hexdigest()
+    calibrations = {pose: path.resolve() for pose, path in calibrations.items()}
+    calibration_hashes = {pose: hashlib.sha256(path.read_bytes()).hexdigest()
+                          for pose, path in calibrations.items()}
     summary = {"complete": 0, "skipped": 0, "failed": 0,
-               "calibration": str(calibration),
-               "calibration_sha256": calibration_hash, "views": {}}
+               "calibrations_by_pose": {str(pose): {"path": str(path),
+                   "sha256": calibration_hashes[pose]}
+                   for pose, path in calibrations.items()}, "views": {}}
     for source in selected_complete_sources(session_root, pose_ids, angles):
+        manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+        pose_id = int(manifest["arm_pose_id"])
+        calibration = calibrations[pose_id]
         view_root = source.parent
         name = f"{view_root.name}/{source.name}"
         target = processed_root / view_root.name / source.name
@@ -127,7 +147,7 @@ def reconstruct_session(session_root: Path, processed_root: Path, pose_ids: list
         status_path = target / "reconstruction_status.json"
         fingerprint = {"source_manifest_sha256": hashlib.sha256(
             (source / "manifest.json").read_bytes()).hexdigest(),
-            "calibration_sha256": calibration_hash,
+            "calibration_sha256": calibration_hashes[pose_id],
             "min_depth_mm": min_depth_mm, "max_depth_mm": max_depth_mm}
         if status_path.is_file():
             status = json.loads(status_path.read_text(encoding="utf-8"))
@@ -166,11 +186,11 @@ def reconstruct_session(session_root: Path, processed_root: Path, pose_ids: list
 
 
 def finish_session(args, session_root: Path, processed_root: Path,
-                   pose_ids: list[int], angles: list[int], calibration: Path,
+                   pose_ids: list[int], angles: list[int], calibrations: dict[int, Path],
                    reconstruct) -> int:
     """Reconstruct first, then fuse the selected repeats if every view passed."""
     result = reconstruct_session(session_root, processed_root, pose_ids, angles,
-                                 calibration, reconstruct,
+                                 calibrations, reconstruct,
                                  args.reconstruction_min_depth_mm,
                                  args.reconstruction_max_depth_mm)
     if result or args.no_fusion:
@@ -179,7 +199,7 @@ def finish_session(args, session_root: Path, processed_root: Path,
     try:
         sources = selected_complete_sources(session_root, pose_ids, angles)
         fuse_reconstructed_session(
-            session_root, sources, calibration, args.fusion_axis_images, args.board,
+            session_root, sources, calibrations[1], args.fusion_axis_images, args.board,
             args.output, args.processed_output, radius_mm=args.fusion_radius_mm,
             height_mm=tuple(args.fusion_height_mm), voxel_mm=args.fusion_voxel_mm,
             exclude_view_ids=set(args.fusion_exclude_view or ()))
@@ -189,29 +209,44 @@ def finish_session(args, session_root: Path, processed_root: Path,
         return 1
 
 
-def load_reference(path: Path, board_config: dict, stereo_path: Path):
-    import numpy as np
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if data.get("board") != board_config or \
-       Path(data["stereo_calibration"]).resolve() != stereo_path.resolve():
-        raise ValueError("Fixed-board reference differs from board or stereo calibration")
-    name = data["reference_capture"]
-    row = next(item for item in data["observations"] if item["name"] == name)
-    if row["pose"] != "lower":
-        raise ValueError("Reference capture must be lower pose")
-    return np.asarray(row["T_left_from_board"], dtype=np.float64)
-
-
-def localize(left, board, K, D, reference, min_corners=12, max_rms_px=3.0):
+def localize(left, board, K, D, min_corners=12, max_rms_px=3.0):
     corners, ids, method = detect_corners_with_contrast_fallback(left, board, min_corners)
     if len(ids) < min_corners:
         raise ValueError(f"Only {len(ids)} fixed-board corners; need {min_corners}")
     current, rms = estimate_pose(board, corners, ids, K, D)
     if rms > max_rms_px:
         raise ValueError(f"Fixed-board reprojection RMS {rms:.2f} px exceeds {max_rms_px:.2f} px")
-    return {"T_reference_from_left": relative_transform(reference, current).tolist(),
+    return {"coordinate_frame": "fixed_ChArUco_board",
+            "T_reference_from_left": np.linalg.inv(current).tolist(),
             "T_left_from_board": current.tolist(), "corners": len(ids),
             "detection_method": method, "reprojection_rms_px": rms}
+
+
+def refresh_camera_poses(session_root: Path, processed_root: Path,
+                         sources: list[Path], board, K, D,
+                         min_corners: int, max_rms_px: float) -> None:
+    """Re-localize complete captures with the intrinsics used for reconstruction."""
+    from capture import _write_json
+
+    poses, per_view = {}, {}
+    for source in sources:
+        image_path = source / "left" / "000_black.png"
+        image = cv2.imdecode(np.frombuffer(image_path.read_bytes(), np.uint8),
+                             cv2.IMREAD_COLOR)
+        if image is None:
+            raise ValueError(f"Cannot read fixed-board black frame: {image_path}")
+        result = localize(image, board, K, D, min_corners, max_rms_px)
+        name = f"{source.parent.name}/{source.name}"
+        poses[name] = result["T_reference_from_left"]
+        per_view[name] = {"corners": result["corners"],
+                          "reprojection_rms_px": result["reprojection_rms_px"],
+                          "black_frame": str(image_path.resolve())}
+    _write_json(session_root / "camera_poses.json", poses)
+    processed_root.mkdir(parents=True, exist_ok=True)
+    _write_json(processed_root / "camera_pose_refresh.json", {
+        "intrinsics_sha256": hashlib.sha256(np.asarray(K).tobytes() +
+                                             np.asarray(D).tobytes()).hexdigest(),
+        "views": per_view})
 
 
 def parser():
@@ -226,12 +261,12 @@ def parser():
     p.add_argument("--arm-pose-id", type=int, choices=(0, 1),
                    help="Capture one pose; default captures upper and lower")
     p.add_argument("--arm-settle-s", type=float, default=6.0)
-    p.add_argument("--reference-calibration", type=Path,
-                   default=ROOT / "calibration/arm_fixed_board/board_repeat_01/two_pose_calibration.json")
     p.add_argument("--board", type=Path,
                    default=ROOT / "arm/targets/charuco_7x5_10mm_7mm_config.json")
-    p.add_argument("--stereo", type=Path,
-                   default=ROOT / "calibration/stereo/stereo_calibration.json")
+    p.add_argument("--stereo-upper", type=Path,
+                   default=ROOT / "calibration/stereo_pose_upper/stereo_calibration.json")
+    p.add_argument("--stereo-lower", type=Path,
+                   default=ROOT / "calibration/stereo_pose_lower/stereo_calibration.json")
     p.add_argument("--min-board-corners", type=int, default=12)
     p.add_argument("--max-board-rms-px", type=float, default=3.0)
     p.add_argument("--repeat-id", type=int, default=1)
@@ -240,13 +275,10 @@ def parser():
     p.add_argument("--processed-output", type=Path, default=ROOT / "processed")
     p.add_argument("--reconstruction-min-depth-mm", type=float)
     p.add_argument("--reconstruction-max-depth-mm", type=float)
-    p.add_argument("--no-board-stereo-correction", action="store_true",
-                   help="Use the original stereo calibration without fitting the scan's paired fixed-board images")
     p.add_argument("--no-fusion", action="store_true",
                    help="Reconstruct views but skip automatic point cloud fusion")
     p.add_argument("--fusion-axis-images", type=Path,
-                   default=ROOT / "raw/turntable_axis/axis_cube_01",
-                   help="complete turntable axis photo session to recalibrate with this scan's stereo geometry")
+                   help="required for automatic fusion: new joint fixed-board/axis capture session")
     p.add_argument("--fusion-radius-mm", type=float, default=65.0)
     p.add_argument("--fusion-height-mm", type=float, nargs=2, default=(-95.0, 110.0),
                    metavar=("MIN", "MAX"))
@@ -274,9 +306,6 @@ def main(argv=None) -> int:
     from capture import (Pattern, PREVIEW, PROJECTOR, SAFE, _write_json, capture_once,
                          close_cameras, displays, grab_pair, make_dense_dots, open_cameras,
                          preview_pair, reserve_view, select_projector_display, show_pattern)
-    import cv2
-    import numpy as np
-
     angles = angles_for_range(args.start_angle, args.end_angle, args.step_angle)
     pose_ids = [args.arm_pose_id] if args.arm_pose_id is not None else [0, 1]
     if args.port == args.arm_port or args.arm_settle_s < 0 or \
@@ -284,12 +313,9 @@ def main(argv=None) -> int:
         raise ValueError("Invalid arm port, settle time, or fixed-board quality limits")
     board_config = json.loads(args.board.read_text(encoding="utf-8"))
     board = board_from_config(board_config)
-    stereo = json.loads(args.stereo.read_text(encoding="utf-8"))
-    if (args.left_serial, args.right_serial) != (stereo["left_serial"], stereo["right_serial"]):
-        raise ValueError("Camera serials differ from stereo calibration")
-    reference = load_reference(args.reference_calibration, board_config, args.stereo)
-    K = np.asarray(stereo["K_left"], dtype=np.float64)
-    D = np.asarray(stereo["D_left"], dtype=np.float64)
+    calibrations, K, D, camera_size = load_pose_calibrations(
+        args.stereo_upper, args.stereo_lower,
+        (args.left_serial, args.right_serial))
     if not SAFE.fullmatch(args.object_id) or not SAFE.fullmatch(args.session_id):
         raise ValueError("object-id and session-id require letters, digits, _ or -")
     if args.repeat_id < 1 or args.motion_settle_s < 0 or args.return_settle_s < 0 or args.settle_ms < 1 or \
@@ -303,22 +329,24 @@ def main(argv=None) -> int:
                                args.fusion_height_mm[0] >= args.fusion_height_mm[1]):
         raise ValueError("Invalid fusion radius, height or voxel size")
     if not args.no_fusion:
+        if args.fusion_axis_images is None:
+            raise ValueError("Automatic fusion requires --fusion-axis-images from a joint "
+                             "fixed-board/turntable-axis capture; or use --no-fusion")
         from fusion_pipeline import validate_axis_capture
         validate_axis_capture(args.fusion_axis_images)
-    calibration_npz = args.stereo.with_suffix(".npz")
-    if not calibration_npz.is_file():
-        raise FileNotFoundError(f"Stereo reconstruction calibration missing: {calibration_npz}")
     args.trigger = "software"
     session_root = args.output / args.object_id / args.session_id
     plan = {"angles_deg": angles, "arm_pose_ids": pose_ids,
-            "protocol": "dense_dots_v2", "dot_cell_px": args.dot_cell_px,
+            "protocol": "dense_dots_v3", "dot_cell_px": args.dot_cell_px,
             "dot_seed": args.dot_seed, "dot_frames": args.dot_frames,
             "left_serial": args.left_serial, "right_serial": args.right_serial,
             "exposure_us": args.exposure_us, "gain_db": args.gain_db,
             "port": args.port, "arm_port": args.arm_port,
             "arm_settle_s": args.arm_settle_s,
-            "reference_calibration": str(args.reference_calibration.resolve()),
-            "board": board_config, "stereo": str(args.stereo.resolve()),
+            "reference_frame": "fixed_ChArUco_board",
+            "board": board_config,
+            "stereo_by_pose": {str(pose): str(calibrations[pose].with_suffix(".json"))
+                               for pose in (0, 1)},
             "motion_settle_s": args.motion_settle_s,
             "pattern_settle_ms": args.settle_ms, "timeout_ms": args.timeout_ms,
             "display_name": args.display}
@@ -334,11 +362,11 @@ def main(argv=None) -> int:
     if not pending:
         print("All requested views already captured; checking reconstruction.")
         from reconstruct_view import main as reconstruct_view
-        reconstruction_calibration = prepare_reconstruction_calibration(
-            session_root, processed_root, pose_ids, angles, calibration_npz,
-            args.board, enabled=not args.no_board_stereo_correction)
+        refresh_camera_poses(session_root, processed_root,
+            selected_complete_sources(session_root, pose_ids, angles), board, K, D,
+            args.min_board_corners, args.max_board_rms_px)
         return finish_session(args, session_root, processed_root, pose_ids, angles,
-                              reconstruction_calibration, reconstruct_view)
+                              calibrations, reconstruct_view)
 
     display = select_projector_display(displays(), args.display)
     patterns = make_dense_dots(dot_cell=args.dot_cell_px, seed=args.dot_seed,
@@ -346,7 +374,7 @@ def main(argv=None) -> int:
     cameras = controller = arm_controller = None
     try:
         cameras, converter, pylon, size = open_cameras(args)
-        if list(size) != list(stereo["image_size"]):
+        if tuple(size) != camera_size:
             raise ValueError("Camera size differs from stereo calibration")
         controller = open_controller(args.port)
         arm_controller = open_arm_controller(args.arm_port)
@@ -387,29 +415,8 @@ def main(argv=None) -> int:
             time.sleep(settle_s)
             directory = reserve_view(args.output, args.object_id, args.session_id,
                                      view_id, args.repeat_id)
-            try:
-                show_pattern(Pattern("black", np.zeros_like(patterns[0].image)), display)
-                cv2.waitKey(args.settle_ms)
-                left, right, stamps = grab_pair(cameras, converter, pylon, args.timeout_ms)
-                for side, image in (("left", left), ("right", right)):
-                    target = directory / "localization" / f"{side}.png"
-                    target.parent.mkdir(exist_ok=True)
-                    ok, encoded = cv2.imencode(".png", image)
-                    if not ok:
-                        raise RuntimeError(f"Cannot encode localization image: {target}")
-                    target.write_bytes(encoded.tobytes())
-                localization = localize(left, board, K, D, reference,
-                                        args.min_board_corners, args.max_board_rms_px)
-                localization.update({"left_image": "localization/left.png",
-                                     "right_image": "localization/right.png", "device_ticks": stamps,
-                                     "reference_calibration": str(args.reference_calibration.resolve())})
-                _write_json(directory / "localization.json", localization)
-            except BaseException as exc:
-                _write_json(directory / "failure.json", {"error": str(exc),
-                    "time": datetime.now().astimezone().isoformat()})
-                raise
             metadata = {"created_at": datetime.now().astimezone().isoformat(),
-                "protocol": "dense_dots_v2", "dot_cell_px": args.dot_cell_px,
+                "protocol": "dense_dots_v3", "dot_cell_px": args.dot_cell_px,
                 "dot_seed": args.dot_seed, "dot_frames": args.dot_frames,
                 "pattern_order": [p.name for p in patterns],
                 "pattern_sha256": {p.name: hashlib.sha256(p.image.tobytes()).hexdigest()
@@ -421,23 +428,45 @@ def main(argv=None) -> int:
                 "view_id": view_id, "arm_pose_id": arm_pose_id,
                 "arm_serial_command": arm_command.decode("ascii"),
                 "localization_image": "localization/left.png",
-                "localization_rms_px": localization["reprojection_rms_px"],
                 "turntable_deg_commanded": angle,
                 "turntable_pwm_commanded": ANGLE_TO_PWM[angle],
                 "turntable_serial_command": command.decode("ascii"),
                 "turntable_command_sent_at": sent_at,
                 "motion_settle_s": settle_s,
                 "timestamp_note": "Camera ticks are from independent clocks; do not subtract"}
-            _write_json(directory / "pose.json", {"arm_pose_id": arm_pose_id,
-                "turntable_deg_commanded": angle, "turntable_pwm_commanded": ANGLE_TO_PWM[angle],
-                "turntable_command_sent_at": sent_at, "verified_pose": False,
-                "camera_pose_verified": True,
-                "localization_file": "localization.json",
-                "note": "Camera pose optically localized; turntable arrival still unverified"})
+            localization_result = {}
+
+            def on_black(left, right, stamps, row):
+                localization = localize(left, board, K, D,
+                                        args.min_board_corners, args.max_board_rms_px)
+                for side, image in (("left", left), ("right", right)):
+                    target = directory / "localization" / f"{side}.png"
+                    target.parent.mkdir(exist_ok=True)
+                    ok, encoded = cv2.imencode(".png", image)
+                    if not ok:
+                        raise RuntimeError(f"Cannot encode localization image: {target}")
+                    target.write_bytes(encoded.tobytes())
+                localization.update({"left_image": "localization/left.png",
+                                     "right_image": "localization/right.png",
+                                     "black_frame_left": row["left"],
+                                     "black_frame_right": row["right"],
+                                     "projection_pattern": "black", "device_ticks": stamps,
+                                     "board_config": str(args.board.resolve())})
+                _write_json(directory / "localization.json", localization)
+                localization_result.update(localization)
+                metadata["localization_rms_px"] = localization["reprojection_rms_px"]
+                _write_json(directory / "pose.json", {"arm_pose_id": arm_pose_id,
+                    "turntable_deg_commanded": angle, "turntable_pwm_commanded": ANGLE_TO_PWM[angle],
+                    "turntable_command_sent_at": sent_at, "verified_pose": False,
+                    "camera_pose_verified": True,
+                    "localization_file": "localization.json",
+                    "note": "Camera pose optically localized; turntable arrival still unverified"})
             try:
-                result = capture_once({"destination": directory, "metadata": metadata},
+                result = capture_once({"destination": directory, "metadata": metadata,
+                                       "on_black": on_black},
                     (cameras, converter, pylon, display, args.settle_ms, args.timeout_ms), patterns)
-                camera_poses[f"view_{view_id:03d}/repeat_{args.repeat_id:03d}"] = localization["T_reference_from_left"]
+                camera_poses[f"view_{view_id:03d}/repeat_{args.repeat_id:03d}"] = \
+                    localization_result["T_reference_from_left"]
                 _write_json(poses_path, camera_poses)
                 print(f"Complete {angle} deg: {result}", flush=True)
             except BaseException as exc:
@@ -454,11 +483,11 @@ def main(argv=None) -> int:
             close_cameras(cameras)
         cv2.destroyAllWindows()
     from reconstruct_view import main as reconstruct_view
-    reconstruction_calibration = prepare_reconstruction_calibration(
-        session_root, processed_root, pose_ids, angles, calibration_npz,
-        args.board, enabled=not args.no_board_stereo_correction)
+    refresh_camera_poses(session_root, processed_root,
+        selected_complete_sources(session_root, pose_ids, angles), board, K, D,
+        args.min_board_corners, args.max_board_rms_px)
     return finish_session(args, session_root, processed_root, pose_ids, angles,
-                          reconstruction_calibration, reconstruct_view)
+                          calibrations, reconstruct_view)
 
 
 if __name__ == "__main__":

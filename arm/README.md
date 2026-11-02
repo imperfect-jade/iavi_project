@@ -1,5 +1,7 @@
 # 机械臂两位姿串口控制
 
+当前 `system/scan_session.py` 每个视角直接从静止 ChArUco 板求相机位姿，并以板为共同坐标系；扫描与融合无需预先标定机械臂两位姿。
+
 `arm.py` 通过 Jibot1 控制板的 USB 串口发送六舵机组合命令，切换已试过的“上”和“下”两个相机姿态。不会修改固件或 Zide 动作组。两组目标取自本次实机测试；下姿态原始文本中的 `##004` 和最后缺失的 `!` 已按协议修正。
 
 ## 准备
@@ -40,34 +42,10 @@ python arm\arm.py --port COM7 --connect-only
 
 此命令不会发送任何舵机位姿或动作组指令。若仍出现抓取、开机蜂鸣或突然复位，应到 Zide 检查并清除控制板中保存的**开机动作/开机命令**，然后复测；这属于控制板持久配置，Python 脚本没有修改它。若仅在手柄工作或曾启动动作组后出现，关闭手柄并确认当前动作组已结束再测试。厂家源码中位姿 `#...P...T...!` 不会取消正在执行的动作组，后续动作组步骤可能覆盖刚发的位姿。不要在机械臂带相机、靠近标定板时带载尝试不熟悉的动作组。
 
-## 固定 ChArUco 板：两位姿拍摄与标定
+## 固定 ChArUco 板
 
-使用 [图案](targets/charuco_7x5_10mm_7mm_85x65mm.png)、[A4 打印版](targets/charuco_7x5_10mm_7mm_A4_print.pdf) 和 [配置](targets/charuco_7x5_10mm_7mm_config.json)，生成脚本为 [generate_charuco_board.py](generate_charuco_board.py)：7×5 个方格，方格边长 **10 mm**，标记边长 **7 mm**，图案区域 **70×50 mm**，裁切纸张 **85×65 mm**。打印时用 **100% 原尺寸**，关闭“适合页面”，用尺量相邻方格确实为 10 mm；平贴到硬质平板，不要弯折。若实体尺寸不同，应先改配置的实际尺寸再标定，不能只修改文件名。
+[图案](targets/charuco_7x5_10mm_7mm_85x65mm.png)、[A4 打印版](targets/charuco_7x5_10mm_7mm_A4_print.pdf) 和 [配置](targets/charuco_7x5_10mm_7mm_config.json) 使用 10 mm 方格、7 mm 标记。打印时使用 100% 原尺寸，并将纸张平贴在硬质平板上。
 
-将板固定在**转台外侧、不会随转台或机械臂移动**的支架上，图案朝两个拍摄位置之间，距离接近物体拍摄深度。先让转台停在 **0°**，移走遮挡板的物体，让上、下位姿的**左相机**都能清晰看到尽量完整的板；右相机同时看到更便于核查。板不能在扫描期间移动。均匀照亮、对焦、避免反光和投影条纹。转台 0° 由操作者确认，本脚本不会控制 COM6。
+把固定板放在转台外侧，确保它不会随转台或机械臂移动，且在转轴标定与物体扫描期间保持同一位置。上下姿态的左右相机都应清晰看到板；避免遮挡、反光和过曝。`system/scan_session.py` 在每个扫描视角拍摄固定板并求出该次相机位姿；`turntable/calibrate_axis.py` 在转轴采集图中同时标定固定板与转轴。无需单独运行机械臂两位姿标定。
 
-关闭 Zide 和其他 COM7 占用者；确认机械臂整段运动路径无碰撞、线缆牵拉或持续抖动。安装项目既有相机环境及 `opencv-contrib-python`、`pypylon`、`pyserial`。在项目根目录先做一次往返试拍：
-
-```powershell
-python arm\capture_fixed_board.py --session-id board_trial_01 --port COM7 --repeats 1
-```
-
-默认顺序是**上→下→上**；每次发送位姿命令后等待 6 秒再拍照（可用 `--settle-s` 调整），左图检测至少 12/24 个 ChArUco 内角点，最多拍 3 次，保存左右原始 PNG、标出左图检测角点的 `left_detected.png` 和 `capture_manifest.json`。原图角点不足时，程序会尝试局部对比度增强，只将增强图用于角点检测，PnP 仍使用原相机内参与原图像素坐标；记录中的 `left_detection_method` 会注明 `raw` 或 `clahe`。若失败，`complete=false`，已拍图片仍留在 `raw/arm_fixed_board/board_trial_01`，可检查遮挡、焦距、曝光和支架，然后用新的 session ID 重拍。串口命令和固定等待时间无法证明机械臂已稳定；尤其要观察曾抖动的 002 舵机。需要保存舵机读回时加 `--readback`，读回仍不能代替照片定位。
-
-`--images` 必须指向拍摄命令的 `--session-id` 对应目录。当前工作目录里的 `board_trial_01` 因下位姿角点不足，`capture_manifest.json` 为 `complete=false`，不能直接标定。调整光照后，请使用一个新的会话名，先拍摄成功，再标定同名目录，例如：
-
-```powershell
-python arm\capture_fixed_board.py --session-id fixed_board_01 --port COM7 --repeats 1
-python arm\calibrate_fixed_board.py --images raw\arm_fixed_board\fixed_board_01
-```
-
-试拍通过后，建议用多次往返检查回位稳定性。以下示例中的 `board_repeat_01` 只有执行第一条命令并成功结束后才会存在：
-
-```powershell
-python arm\capture_fixed_board.py --session-id board_repeat_01 --port COM7 --repeats 5
-python arm\calibrate_fixed_board.py --images raw\arm_fixed_board\board_repeat_01
-```
-
-程序使用已有 `calibration/stereo/stereo_calibration.json` 中**原始左相机**的 `K_left` 和 `D_left`，重新检测每张左图，用 PnP 求 `T_left_from_board`，再以第一张下位姿左相机为参考计算 `T_reference_from_left`。单位为 mm；结果保存在 `calibration/arm_fixed_board/board_repeat_01/two_pose_calibration.json`。程序核对左右相机序列号、图像尺寸、板参数；默认至少 12 个角点且单张重投影 RMS 不超过 3 px，不满足就报错，不能把错误结果悄悄用于融合。输出包含每张图的角点数、重投影误差、变换矩阵和相同姿态首次到位后的平移/旋转回位误差。试拍也可以用同样的标定命令处理。
-
-板的位姿应跨所有拍摄保持不变。若同一姿态回位误差对目标重建精度不可接受，正式扫描时每次到位后都应拍板重新定位。当前 JSON 的键是**标定拍摄**名称，不能直接作为 `fuse_views.py --camera-poses` 的 `view_###/repeat_###` 映射。本项目的转台轴在相同下位姿相机位置标定，固定板标定与新采集统一采用首次下位姿左相机参考系。
+`capture_fixed_board.py` 可选用于检查上下姿态的板可见性和机械臂回位，但其照片不参与当前重建流水线。

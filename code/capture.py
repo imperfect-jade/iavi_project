@@ -32,10 +32,10 @@ class Pattern:
 
 
 def make_dense_dots(width=1920, height=1080, dot_cell=8, seed=5, count=5):
-    """Independent reproducible Lab5-style dot fields and one white frame."""
+    """One black board frame, reproducible dot fields, and one white frame."""
     if min(width, height, dot_cell, count) < 1 or count > 32:
         raise ValueError("Projector dimensions and dot cell must be positive; use 1-32 dot frames")
-    patterns = []
+    patterns = [Pattern("black", np.zeros((height, width), np.uint8))]
     for index in range(count):
         rng = np.random.default_rng(seed + index)
         cells = rng.random((math.ceil(height / dot_cell),
@@ -308,6 +308,9 @@ def capture_once(view_context, devices, protocol):
     cameras, converter, pylon, display, settle_ms, timeout_ms = devices
     directory = Path(view_context["destination"])
     order = [p.name for p in protocol]
+    on_black = view_context.get("on_black")
+    if on_black is not None and (not order or order[0] != "black"):
+        raise ValueError("Fixed-board localization requires black as the first frame")
     rows = []
     try:
         for index, pattern in enumerate(protocol):
@@ -317,6 +320,8 @@ def capture_once(view_context, devices, protocol):
             left, right, stamps = grab_pair(cameras, converter, pylon, timeout_ms)
             row = save_pair(directory, index, pattern.name, left, right, stamps)
             rows.append(row)
+            if pattern.name == "black" and on_black is not None:
+                on_black(left, right, stamps, row)
             with (directory / "frames.jsonl").open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(row) + "\n")
             print(f"Saved {index+1}/{len(order)}: {Path(row['left']).name} (left + right)", flush=True)
@@ -450,7 +455,7 @@ def main(argv=None):
             directory = reserve_view(args.output, args.object_id, args.session_id,
                                      args.view_id, args.repeat_id)
             metadata = {"created_at": datetime.now().astimezone().isoformat(),
-                "protocol": "dense_dots_v2",
+                "protocol": "dense_dots_v3",
                 "dot_cell_px": args.dot_cell_px,
                 "dot_seed": args.dot_seed,
                 "dot_frames": args.dot_frames,

@@ -2,6 +2,7 @@
 /raw/
 /processed/
 /calibration/
+/docs/
 
 # Generated training data and model runs
 /server/smoke_data/
@@ -28,4 +29,3 @@ Thumbs.db
 # Temporary files and logs
 *.log
 *.tmp
-docs/superpowers/plans/2026-11-01-board-stereo-correction.md

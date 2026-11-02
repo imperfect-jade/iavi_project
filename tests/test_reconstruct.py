@@ -6,10 +6,40 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
-from reconstruct_view import load_run, q_for_scale, white_alignment_warnings, stereo_disparity, estimate_disparity_range, fuse_disparities, disparity_bounds_from_matches
+from reconstruct_view import load_run, q_for_scale, white_alignment_warnings, stereo_disparity, estimate_disparity_range, fuse_disparities, disparity_bounds_from_matches, default_pose_calibration
 
 
 class ReconstructionTests(unittest.TestCase):
+    def test_default_calibration_follows_scan_arm_pose(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            view = Path(tmp)
+            for pose, name in ((0, "stereo_pose_upper"), (1, "stereo_pose_lower")):
+                (view / "manifest.json").write_text(json.dumps({"arm_pose_id": pose}))
+                self.assertEqual(default_pose_calibration(view).parent.name, name)
+
+    def test_v3_scan_accepts_black_board_frame_before_dots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for side in ("left", "right"):
+                (root / side).mkdir()
+            patterns = ["black", "dense_dots_00", "white"]
+            frames = []
+            for index, pattern in enumerate(patterns):
+                row = {"index": index, "pattern": pattern}
+                for side in ("left", "right"):
+                    row[side] = f"{side}/{index:03d}_{pattern}.png"
+                    (root / row[side]).write_bytes(b"image")
+                frames.append(row)
+            (root / "manifest.json").write_text(json.dumps({
+                "projector_size_px": [1920, 1080], "complete": True,
+                "protocol": "dense_dots_v3", "dot_frames": 1,
+                "pattern_order": patterns, "frame_count": 3, "frames": frames,
+                "camera_size_px": [16, 16], "left_serial": "L", "right_serial": "R"}),
+                encoding="utf-8")
+            _, loaded = load_run(root, {"image_size": [16, 16],
+                                        "left_serial": "L", "right_serial": "R"})
+            self.assertEqual([row["pattern"] for row in loaded], patterns)
+
     def test_sparse_dot_frames_can_estimate_one_pooled_range(self):
         frames = [[218.0, 219.0, 220.0] for _ in range(5)]
         with self.assertRaisesRegex(ValueError, "only 3 reliable matches"):

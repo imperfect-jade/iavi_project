@@ -19,13 +19,45 @@ class CalibrationTests(unittest.TestCase):
     def test_stereo_calibration_requires_explicit_square_size(self):
         parser = calibrate_stereo.build_parser()
         with self.assertRaises(SystemExit):
-            parser.parse_args(["--validation", "validation"])
+            parser.parse_args(["--pose", "lower", "--validation", "validation"])
 
     def test_stereo_calibration_uses_standard_five_coefficient_model_by_default(self):
         args = calibrate_stereo.build_parser().parse_args(
-            ["--validation", "validation", "--square-mm", "12"])
+            ["--pose", "lower", "--validation", "validation", "--square-mm", "12"])
         self.assertEqual(args.distortion_model, "standard5")
         self.assertEqual(args.square_mm, 12)
+
+    def test_pose_options_use_separate_output_directories(self):
+        lower = calibrate_stereo.calibration_options(
+            ["--pose", "lower", "--validation", "validation", "--square-mm", "12"])
+        upper = calibrate_stereo.calibration_options(
+            ["--pose", "upper", "--validation", "validation_02", "--square-mm", "12"])
+        self.assertEqual(lower.output, calibrate_stereo.ROOT / "calibration/stereo_pose_lower")
+        self.assertEqual(upper.output, calibrate_stereo.ROOT / "calibration/stereo_pose_upper")
+        self.assertEqual(upper.train, calibrate_stereo.ROOT / "raw/calibration/session_02")
+        self.assertEqual(upper.lower_calibration,
+                         calibrate_stereo.ROOT / "calibration/stereo_pose_lower/stereo_calibration.npz")
+
+    def test_both_poses_require_independent_validation_and_upper_dispatches(self):
+        with self.assertRaises(SystemExit):
+            calibrate_stereo.calibration_options(["--pose", "lower", "--square-mm", "12"])
+        with self.assertRaises(SystemExit):
+            calibrate_stereo.calibration_options(["--pose", "upper", "--square-mm", "12"])
+        with patch("calibrate_stereo.run_upper_pose", return_value=0) as upper:
+            self.assertEqual(calibrate_stereo.main(["--pose", "upper", "--square-mm", "12",
+                "--validation", "validation_02"]), 0)
+            self.assertEqual(upper.call_args.args[0].pose, "upper")
+
+    def test_upper_training_and_validation_directories_must_differ(self):
+        with self.assertRaises(SystemExit):
+            calibrate_stereo.calibration_options(["--pose", "upper", "--square-mm", "12",
+                "--train", "same", "--validation", "same"])
+
+    def test_pose_output_cannot_overwrite_other_pose(self):
+        upper_dir = calibrate_stereo.ROOT / "calibration/stereo_pose_upper"
+        with self.assertRaises(SystemExit):
+            calibrate_stereo.calibration_options(["--pose", "lower", "--square-mm", "12",
+                "--validation", "validation", "--output", str(upper_dir)])
 
     def test_color_annotation_name_uses_prefix(self):
         self.assertEqual(color_pair_name("color_001"), "color_001")
