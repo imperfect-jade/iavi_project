@@ -10,6 +10,8 @@
 /server/runs/
 /datasets/
 /runs/
+/models/
+/PointNet/outputs/
 
 # Python caches and local environments
 __pycache__/

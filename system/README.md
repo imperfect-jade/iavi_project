@@ -37,6 +37,8 @@ python system\scan_session.py --port COM6 --arm-port COM7 --start-angle 0 --end-
 
 `scan_session.py` 自动按每张扫描清单的 `arm_pose_id` 选择双目标定并记录文件哈希。两套标定须使用相同的相机序列号、图像尺寸、左右内参与畸变和基线长度，并提供固定板坐标系下的逐视角相机位姿与转轴；相对旋转和基线方向可以随机械臂位姿不同。`--resume` 会重新计算固定板相机位姿。单独调用 `reconstruct_view.py --view ...` 时也会按清单里的位姿选标定，可用 `--calibration` 显式覆盖。
 
+单独调用 `fuse_views.py` 时须用 `--axis-calibration` 指定对应扫描会话的转轴 JSON；固定板坐标系中的轴还需加 `--axis-already-in-reference`。手动融合不预选某次历史轴标定。自动融合会把本次重算的轴文件显式传给融合程序。
+
 默认物体裁剪为轴周围半径 65 mm、高度 -95～110 mm，体素 1 mm；可用 `--fusion-radius-mm`、`--fusion-height-mm MIN MAX`、`--fusion-voxel-mm` 按物体尺寸调整。默认融合所有选定视角；疑似异常视角可用 `--fusion-exclude-view 11` 排除，多次传入可排除多个视角。`--resume` 时可以改变这些融合参数而不重新拍摄。确需只重建、不融合时使用 `--no-fusion`。
 
 最终点云在 `processed/fused/<object-id>/<session-id>/all_views_axis_calibrated/fused.ply`，同时保存 `fusion.json`、逐视角 `aligned/*.ply`、会话专属 `fusion_calibration/axis_calibration.json` 和 `fusion_status.json`。默认只选每个视角最新的完整 repeat；融合失败会以非零退出码报告并保留原始照片和已完成的重建。裁剪范围和轴质量门限需按实际物体核对，自动结果是点云而非封闭网格。

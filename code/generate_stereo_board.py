@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "calibration" / "stereo" / "targets"
+OUT = ROOT / "calibration" / "targets" / "stereo_checkerboard"
 PX_PER_MM = 20  # 508 dpi; integer pixels per millimetre
 SQUARE_MM = 12
 SQUARES_X, SQUARES_Y = 11, 7

@@ -12,7 +12,7 @@ import yaml
 from torch.utils.data import DataLoader, Dataset
 
 from data import load_split, validate_disjoint_objects
-from model import GainPolicy, masked_smooth_l1
+from model import make_gain_policy, masked_smooth_l1
 
 
 class Samples(Dataset):
@@ -36,7 +36,7 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def epoch_loss(model, loader, device, optimizer=None):
+def epoch_loss(model, loader, device, optimizer=None, rollout_weight=1.0):
     model.train(optimizer is not None)
     total, count = 0.0, 0
     context = torch.enable_grad() if optimizer is not None else torch.no_grad()
@@ -46,13 +46,17 @@ def epoch_loss(model, loader, device, optimizer=None):
             prediction = model(*(batch[key] for key in (
                 "points", "point_mask", "visited_mask", "available_mask",
                 "current_action_id", "used_scans")))
-            loss = masked_smooth_l1(prediction, batch["gain_target"], batch["gain_loss_mask"])
+            weights = (1.0 + (rollout_weight - 1.0) * batch["rollout_state"].float()
+                       if "rollout_state" in batch else None)
+            loss = masked_smooth_l1(prediction, batch["gain_target"],
+                                    batch["gain_loss_mask"], weights)
             if optimizer is not None:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
-            total += float(loss.detach()) * len(batch["points"])
-            count += len(batch["points"])
+            batch_count = float(weights.sum().detach()) if weights is not None else len(batch["points"])
+            total += float(loss.detach()) * batch_count
+            count += batch_count
     return total / count
 
 
@@ -70,6 +74,11 @@ def main():
     paths = {split: (root / data_cfg[split]).resolve() for split in ("train", "val")}
     arrays = {split: load_split(path, point_count, action_count) for split, path in paths.items()}
     validate_disjoint_objects(arrays["train"], arrays["val"])
+    rollout_weight = float(train_cfg.get("rollout_weight", 1.0))
+    if not np.isfinite(rollout_weight) or rollout_weight < 1.0:
+        raise ValueError("rollout_weight must be finite and >= 1")
+    if rollout_weight > 1.0 and any("rollout_state" not in arrays[split] for split in ("train", "val")):
+        raise ValueError("weighted training requires rollout_state in train and val splits")
     fingerprints = {split: sha256(path) for split, path in paths.items()}
     fingerprints["config"] = sha256(config_path)
     seed = int(train_cfg["seed"])
@@ -83,7 +92,7 @@ def main():
         raise RuntimeError("CUDA requested but unavailable")
     output = (root / run_cfg["output_dir"]).resolve()
     output.mkdir(parents=True, exist_ok=True)
-    model = GainPolicy(action_count, model_cfg["center_mm"], model_cfg["scale_mm"]).to(device)
+    model = make_gain_policy(model_cfg).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=float(train_cfg["learning_rate"]),
                                  weight_decay=float(train_cfg["weight_decay"]))
     train_loader = DataLoader(Samples(arrays["train"]), batch_size=int(train_cfg["batch_size"]),
@@ -105,13 +114,15 @@ def main():
         torch.set_rng_state(checkpoint["torch_rng"])
         if device.type == "cuda":
             torch.cuda.set_rng_state_all(checkpoint["cuda_rng"])
-    metadata = {"model": "compact_pointnet_gain_v1", "model_config": model_cfg,
-                "data_fingerprints": fingerprints, "selection_metric": "validation_masked_smooth_l1",
+    metadata = {"model": f"compact_pointnet_gain_{model_cfg.get('version', 'v1')}", "model_config": model_cfg,
+                "data_fingerprints": fingerprints,
+                "selection_metric": "validation_weighted_masked_smooth_l1" if rollout_weight > 1 else "validation_masked_smooth_l1",
+                "rollout_weight": rollout_weight,
                 "note": "Validation rollout AUC requires measured per-view clouds."}
     (output / "model_config.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     for epoch in range(start, int(train_cfg["max_epochs"])):
-        train_loss = epoch_loss(model, train_loader, device, optimizer)
-        val_loss = epoch_loss(model, val_loader, device)
+        train_loss = epoch_loss(model, train_loader, device, optimizer, rollout_weight)
+        val_loss = epoch_loss(model, val_loader, device, rollout_weight=rollout_weight)
         improved = val_loss < best - 1e-8
         if improved:
             best, stale = val_loss, 0

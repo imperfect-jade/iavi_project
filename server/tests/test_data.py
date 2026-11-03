@@ -52,3 +52,15 @@ def test_reject_current_action_not_visited(tmp_path):
     np.savez(path, **arrays)
     with pytest.raises(ValueError, match="current_action_id"):
         load_split(path, 4, 3)
+
+
+def test_optional_rollout_state_is_loaded_and_validated(tmp_path):
+    arrays = sample()
+    arrays["rollout_state"] = np.array([True, False])
+    path = tmp_path / "states.npz"
+    np.savez(path, **arrays)
+    assert load_split(path, 4, 3)["rollout_state"].tolist() == [True, False]
+    arrays["rollout_state"] = np.array([1, 0], np.int64)
+    np.savez(path, **arrays)
+    with pytest.raises(ValueError, match="rollout_state"):
+        load_split(path, 4, 3)

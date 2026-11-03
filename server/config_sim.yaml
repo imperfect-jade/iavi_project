@@ -6,6 +6,7 @@ model:
   action_count: 24
   center_mm: [0.0, 0.0, 50.0]
   scale_mm: 100.0
+  use_points: true
 training:
   batch_size: 16
   max_epochs: 100

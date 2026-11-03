@@ -34,6 +34,30 @@ python train.py --config config_smoke.yaml
 
 ## 二、用 ModelNet40 仿真训练
 
+### 一键生成 200 个多类别 CAD 物体并训练
+
+`run_train_200.sh` 固定使用 ModelNet40 的 `bottle、bowl、cup、vase、flower_pot、lamp、stool、chair、table、guitar` 共 10 类，每类尽量均衡，总计 **160 个训练、20 个验证、20 个测试 CAD 物体**。这里的“200 个样本”指 200 个独立 CAD 物体；每个物体仍生成 200 个不同已访问视角状态，因此训练集约有 32,000 个状态。官方 ModelNet `test` 物体仅进入仿真测试划分。类别选择偏重几何多样性，部分 CAD 形状相当于缩小后的桌面模型，并不代表当前设备已能扫描相同实物。
+
+把脚本与当前 `server/` 代码上传到 AutoDL 后执行：
+
+```bash
+cd /root/autodl-tmp/nbv_project/server
+bash run_train_200.sh
+```
+
+脚本依次检查 CUDA、Open3D、SciPy、各类别网格数量，生成 24 视角点云及数据集，创建 `config_diverse_200_v2.yaml`，训练 V2 PointNet，最后在留出的测试物体上回放评估。默认 batch size 为 512、最多 60 轮、验证损失连续 10 轮不改进则提前停止。较长任务可在 `tmux` 内运行；再次执行脚本会复用完整数据并从可信的 `last.pt` 续训。若仿真在数据集生成前中断，脚本会停止而不会删除已有目录，需要先检查或移走不完整的 `sim_data_diverse_200`。若 batch 512 显存不足，可在**首次训练前**运行 `BATCH_SIZE=256 bash run_train_200.sh`；续训时必须保持相同 batch size 与配置文件。
+
+输出位于 `runs/diverse_200_v2_seed42_24/`：`best_model.pt` 是用于推理的参数，`simulation_rollout.json` 是仿真测试回放，`pipeline.log` 是完整日志。仿真与覆盖表构建主要使用 CPU，训练阶段才使用 GPU。此实验优先得到可用 checkpoint，不能预设模型会优于动作历史或固定顺序。
+
+训练完成后，若已有**当前已扫描视角融合后的物体坐标点云** `(N,3)` `.npy`（单位毫米），可仅执行动作预测：
+
+```bash
+python predict_next_view.py --config config_diverse_200_v2.yaml \
+  --points /root/autodl-tmp/current_observed_object.npy --visited 0 6
+```
+
+输出 `action_id`、`arm_pose_id`、`turntable_deg`。`action_id = arm_pose_id*12 + turntable_deg/30`。每次完成新视角扫描后，先将新点云转换并融合到同一物体坐标系，再把该动作追加到 `--visited`。这个命令只输出建议动作，不会控制机械臂或转盘；实机执行前仍需依据已验证的动作表和安全条件检查可用动作，必要时通过 `--available` 限制候选。
+
 从 [Princeton 官方页面](https://modelnet.cs.princeton.edu/download.html)自行下载 ModelNet40，阅读其学术用途条款，并解压到 AutoDL 数据盘。目录应包含 `类别/train/*.off` 和 `类别/test/*.off`。选择与实验室实物形状相近的类别；命令中的 `bottle`、`bowl` 只有在解压目录确实包含这些类别时才能使用。
 
 仿真器使用 [Open3D 射线投射](https://www.open3d.org/docs/latest/tutorial/geometry/ray_casting.html)求网格表面的首次交点。物体绕转盘轴转动 12 个角度，两台虚拟相机组成刚性双目组件并取两个固定高度；每个动作只保留**左右相机和固定投影仪共同可见**的表面，再把点变换回物体坐标系。因此每个 CAD 物体生成 24 份单视角点云。
@@ -51,7 +75,17 @@ python evaluate_sim.py --sim-root sim_data --config config_sim.yaml
 
 上述上限为训练 10 个、验证 3 个、测试 3 个 CAD 物体。`sim_config.json` 控制模型尺寸、两个相机高度、双目基线、固定投影仪位置、视场角、噪声、丢点率和覆盖容差；**这些目前都是示例参数，并非设备实测值**。脚本输出每个物体的 24 份 `.npy` 点云、清单、独立参考与覆盖表，以及 `train.npz`、`val.npz`、`test.npz`。
 
+脚本按类别轮流选取模型。若某个 CAD 网格在任一动作下无法形成有效的共同可见点云，会记录原因、跳过该网格并从后续模型补足数量；原因保存在 `sim_data/rejected_meshes.json`。若失败数量过多或可用模型不足，脚本会停止，需检查网格朝向、比例或仿真几何。输出目录必须为空；中断后的数据应先移到备份目录，再重新运行更新后的脚本。
+
 物体按 CAD 模型划分：ModelNet 原有的 `test` 模型只进入测试集，验证模型从原有 `train` 模型中划出。`evaluate_sim.py` 在仿真测试模型上输出学习、随机、固定均匀和参考贪心策略的覆盖率曲线与 AUC。仿真只近似几何可见性，**没有模拟格雷码、相移解码、材质反射、真实标定误差或机械重复性**；仿真结果不能证明真实扫描效果，实机结论仍需独立真实物体验证。
+
+### 当前保留的仿真训练与评估入口
+
+`run_train_200.sh` 是当前 200 个多类别 ModelNet 物体的训练入口，使用 `config_sim_v2.yaml` 作为 V2 PointNet 模板，并自动生成 `config_diverse_200_v2.yaml`。它调用 `simulate_modelnet.py`、`build_dataset.py`、`train.py` 和 `evaluate_sim.py`；这些文件仍需保留。`config_sim.yaml` 可用于较小规模的基础仿真实验，`config_smoke.yaml` 与 `make_smoke_data.py` 仅用于流程试跑。
+
+先前用于类别筛选、动作历史消融、多随机种子比较及梯度诊断的脚本和配置已从当前工作目录清理，因此旧实验命令不再适用。已有历史报告仍可作为实验记录阅读；若要复现实验，需恢复对应程序和配置。当前 V2 模型是否真正利用实物点云，仍需通过新物体与真实扫描验证。
+
+本地实机接入与历史数据回放请阅读 [`../PointNet/README.md`](../PointNet/README.md)。`server/predict_next_view.py` 仍是独立的 `(N,3)` 点云命令行推理工具；`PointNet/` 的主动扫描流程使用自身的 `policy.py`。
 
 ## 三、用真实扫描点云制作训练集
 

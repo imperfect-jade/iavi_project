@@ -15,7 +15,10 @@ from data import load_split, validate_disjoint_objects
 
 
 FIELDS = ("points", "point_mask", "visited_mask", "available_mask",
-          "gain_target", "current_action_id", "used_scans", "object_id")
+          "gain_target", "current_action_id", "used_scans", "object_id", "rollout_state")
+
+FIXED_ORDER = [0, 6, 12, 18, 3, 9, 15, 21, 1, 7, 13, 19,
+               4, 10, 16, 22, 2, 8, 14, 20, 5, 11, 17, 23]
 
 
 def voxel_sample(points, voxel_mm, rng, limit=None):
@@ -101,6 +104,43 @@ def make_states(obj, views, table, cfg, rng):
     if len(initial) > max_visits:
         raise ValueError("initial_views leave no eligible action at max state size")
     seen, rows = set(), []
+
+    def add_state(visited, current, rollout_state):
+        key = tuple(np.flatnonzero(visited))
+        if key in seen:
+            return
+        seen.add(key)
+        observed = voxel_sample(np.concatenate([views[i] for i in np.flatnonzero(visited)]),
+                                float(cfg["voxel_mm"]), rng,
+                                limit=int(cfg["point_count"]))
+        points = np.zeros((int(cfg["point_count"]), 3), np.float32)
+        point_mask = np.zeros(int(cfg["point_count"]), bool)
+        points[:len(observed)] = observed
+        point_mask[:len(observed)] = True
+        rows.append((points, point_mask, visited.copy(), np.ones(count, bool),
+                     marginal_gains(table, visited), current, float(visited.sum()),
+                     obj["object_id"], bool(rollout_state)))
+
+    if cfg.get("augment_rollouts", False):
+        order = FIXED_ORDER if count == 24 else list(range(count))
+        fixed = initial + [action for action in order if action not in initial]
+        for size in range(len(initial), max_visits + 1):
+            visited = np.zeros(count, bool)
+            visited[fixed[:size]] = True
+            add_state(visited, fixed[size - 1], True)
+        visited = np.zeros(count, bool)
+        visited[initial] = True
+        current = initial[-1]
+        for size in range(len(initial), max_visits + 1):
+            add_state(visited, current, True)
+            if size < max_visits:
+                gain = marginal_gains(table, visited)
+                choices = np.flatnonzero(~visited)
+                current = int(choices[np.argmax(gain[choices])])
+                visited[current] = True
+        if len(rows) > target_count:
+            raise ValueError(f"{obj['object_id']}: states_per_object too small for rollout prefixes")
+
     attempts = 0
     while len(rows) < target_count:
         attempts += 1
@@ -123,26 +163,24 @@ def make_states(obj, views, table, cfg, rng):
                 ranked = choices[np.argsort(-gain[choices], kind="stable")]
                 current = int(rng.choice(ranked[:min(3, len(ranked))]))
                 visited[current] = True
-        key = tuple(np.flatnonzero(visited))
-        if key in seen:
-            continue
-        seen.add(key)
-        observed = voxel_sample(np.concatenate([views[i] for i in np.flatnonzero(visited)]),
-                                float(cfg["voxel_mm"]), rng,
-                                limit=int(cfg["point_count"]))
-        points = np.zeros((int(cfg["point_count"]), 3), np.float32)
-        point_mask = np.zeros(int(cfg["point_count"]), bool)
-        points[:len(observed)] = observed
-        point_mask[:len(observed)] = True
-        rows.append((points, point_mask, visited, np.ones(count, bool),
-                     marginal_gains(table, visited), current, float(size), obj["object_id"]))
+        add_state(visited, current, False)
     return rows
 
 
-def build_dataset(manifest_path, output_dir):
+def build_dataset(manifest_path, output_dir, *, augment_rollouts=False, reference_dir=None):
     manifest_path = Path(manifest_path).resolve()
     output_dir = Path(output_dir).resolve()
     cfg = read_manifest(manifest_path)
+    cfg["augment_rollouts"] = bool(augment_rollouts)
+    reference_dir = Path(reference_dir).resolve() if reference_dir is not None else None
+    manifest_hash = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    if reference_dir is not None:
+        source_meta = reference_dir.parent / "metadata.json"
+        if not source_meta.is_file():
+            raise ValueError(f"missing reference metadata: {source_meta}")
+        source_hash = json.loads(source_meta.read_text(encoding="utf-8")).get("source_manifest_sha256")
+        if source_hash != manifest_hash:
+            raise ValueError("reference tables were built from a different manifest")
     if output_dir.exists() and any(output_dir.iterdir()):
         raise FileExistsError(f"refusing to overwrite nonempty output directory: {output_dir}")
     rng = np.random.default_rng(int(cfg["seed"]))
@@ -151,9 +189,16 @@ def build_dataset(manifest_path, output_dir):
     for obj in cfg["objects"]:
         views = load_views(obj, manifest_path.parent)
         state_views = [voxel_sample(view, float(cfg["voxel_mm"]), rng) for view in views]
-        reference = voxel_sample(np.concatenate(state_views), float(cfg["voxel_mm"]), rng,
-                                 limit=int(cfg["reference_max_points"]))
-        table = coverage_table(reference, views, float(cfg["tolerance_mm"]))
+        if reference_dir is None:
+            reference = voxel_sample(np.concatenate(state_views), float(cfg["voxel_mm"]), rng,
+                                     limit=int(cfg["reference_max_points"]))
+            table = coverage_table(reference, views, float(cfg["tolerance_mm"]))
+        else:
+            with np.load(reference_dir / f"{obj['object_id']}.npz", allow_pickle=False) as archive:
+                reference, table = archive["reference"], archive["coverage"]
+            if (reference.ndim != 2 or reference.shape[1] != 3 or not np.isfinite(reference).all() or
+                    table.shape != (cfg["action_count"], len(reference)) or table.dtype != np.bool_):
+                raise ValueError(f"{obj['object_id']}: reference/coverage shape mismatch")
         references[obj["object_id"]] = (reference, table)
         splits[obj["split"]].extend(make_states(obj, state_views, table, cfg, rng))
     if not splits["train"] or not splits["val"]:
@@ -170,18 +215,24 @@ def build_dataset(manifest_path, output_dir):
     for oid, (reference, table) in references.items():
         np.savez_compressed(ref_dir / f"{oid}.npz", reference=reference, coverage=table)
     meta = {key: value for key, value in cfg.items() if key != "objects"}
-    meta["source_manifest_sha256"] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    meta["source_manifest_sha256"] = manifest_hash
+    meta["reused_reference_dir"] = str(reference_dir) if reference_dir is not None else None
     meta["objects"] = [{"object_id": obj["object_id"], "split": obj["split"]} for obj in cfg["objects"]]
     (output_dir / "metadata.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     loaded = [load_split(output_dir / f"{split}.npz", int(cfg["point_count"]), int(cfg["action_count"]))
               for split in splits if splits[split]]
     validate_disjoint_objects(*loaded)
-    print({split: len(rows) for split, rows in splits.items()})
+    print({split: {"states": len(rows), "rollout_states": sum(bool(row[-1]) for row in rows)}
+           for split, rows in splits.items()})
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--augment-rollouts", action="store_true")
+    parser.add_argument("--reference-dir", type=Path,
+                        help="reuse existing reference/coverage tables for a controlled comparison")
     args = parser.parse_args()
-    build_dataset(args.manifest, args.output)
+    build_dataset(args.manifest, args.output, augment_rollouts=args.augment_rollouts,
+                  reference_dir=args.reference_dir)

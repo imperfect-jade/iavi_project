@@ -15,6 +15,8 @@ def load_split(path: str | Path, point_count: int, action_count: int) -> dict:
         if missing:
             raise ValueError(f"{path}: missing fields {sorted(missing)}")
         data = {key: archive[key] for key in REQUIRED}
+        if "rollout_state" in archive.files:
+            data["rollout_state"] = archive["rollout_state"]
     n = len(data["points"])
     shapes = {"points": (n, point_count, 3), "point_mask": (n, point_count),
               "visited_mask": (n, action_count), "available_mask": (n, action_count),
@@ -27,6 +29,9 @@ def load_split(path: str | Path, point_count: int, action_count: int) -> dict:
             raise ValueError(f"{path}: {key} shape {data[key].shape}, expected {shape}")
     if data["object_id"].dtype.kind not in "US":
         raise ValueError(f"{path}: object_id must be a string array")
+    if "rollout_state" in data and (data["rollout_state"].shape != (n,) or
+                                    data["rollout_state"].dtype != np.bool_):
+        raise ValueError(f"{path}: rollout_state must be a (N,) bool array")
     for key in ("points", "gain_target", "used_scans"):
         if not np.isfinite(data[key]).all():
             raise ValueError(f"{path}: {key} must be finite")

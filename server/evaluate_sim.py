@@ -8,12 +8,8 @@ import numpy as np
 import torch
 import yaml
 
-from build_dataset import voxel_sample
-from model import GainPolicy, select_action
-
-
-FIXED_ORDER = [0, 6, 12, 18, 3, 9, 15, 21, 1, 7, 13, 19,
-               4, 10, 16, 22, 2, 8, 14, 20, 5, 11, 17, 23]
+from build_dataset import FIXED_ORDER, voxel_sample
+from model import make_gain_policy, select_action
 
 
 def coverage_score(table, visited):
@@ -21,11 +17,12 @@ def coverage_score(table, visited):
 
 
 def policy_choice(model, clouds, visited, point_count, voxel_mm, rng, device):
-    observed = voxel_sample(np.concatenate([clouds[i] for i in visited]), voxel_mm,
-                            rng, limit=point_count)
     points = np.zeros((point_count, 3), np.float32)
     mask = np.zeros(point_count, bool)
-    points[:len(observed)], mask[:len(observed)] = observed, True
+    if model.use_points:
+        observed = voxel_sample(np.concatenate([clouds[i] for i in visited]), voxel_mm,
+                                rng, limit=point_count)
+        points[:len(observed)], mask[:len(observed)] = observed, True
     visited_mask = np.zeros(24, bool)
     visited_mask[visited] = True
     with torch.inference_mode():
@@ -64,6 +61,8 @@ def main():
     parser.add_argument("--config", type=Path, default=Path(__file__).with_name("config_sim.yaml"))
     parser.add_argument("--budget", type=int, default=10)
     parser.add_argument("--random-repeats", type=int, default=20)
+    parser.add_argument("--output", type=Path,
+                        help="report path; defaults to checkpoint directory/simulation_rollout.json")
     args = parser.parse_args()
     if not 2 <= args.budget <= 24 or args.random_repeats < 1:
         raise ValueError("budget must be 2..24 and random-repeats positive")
@@ -74,7 +73,7 @@ def main():
     mc = config["model"]
     if mc["action_count"] != 24 or manifest["action_count"] != 24:
         raise ValueError("evaluation requires the 24-action protocol")
-    model = GainPolicy(24, mc["center_mm"], mc["scale_mm"]).to(device)
+    model = make_gain_policy(mc).to(device)
     weights = (args.config.parent / config["runtime"]["output_dir"] / "best_model.pt").resolve()
     model.load_state_dict(torch.load(weights, map_location=device, weights_only=True))
     model.eval()
@@ -99,7 +98,8 @@ def main():
         print(oid, {k: round(v["auc"], 4) for k, v in result.items() if isinstance(v, dict)})
     if not output:
         raise ValueError("manifest has no test objects")
-    report = weights.parent / "simulation_rollout.json"
+    report = args.output.resolve() if args.output else weights.parent / "simulation_rollout.json"
+    report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(json.dumps(output, indent=2), encoding="utf-8")
     print(f"wrote {report}")
 

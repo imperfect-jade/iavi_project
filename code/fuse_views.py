@@ -14,7 +14,6 @@ import numpy as np
 from reconstruct_view import write_ply
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_AXIS_CALIBRATION = ROOT / "calibration/turntable_axis/axis_cube_01/axis_calibration.json"
 VERTEX = np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
                    ("red", "u1"), ("green", "u1"), ("blue", "u1")])
 
@@ -170,7 +169,7 @@ def main(argv=None):
     p.add_argument("--axis-point-mm", type=float, nargs=3,
                    help="measured turntable axis point in the camera-pose reference frame")
     p.add_argument("--axis-calibration", type=Path,
-                   help=f"turntable/calibrate_axis.py JSON (default: {DEFAULT_AXIS_CALIBRATION})")
+                   help="turntable/calibrate_axis.py JSON; specify the axis for this scan")
     p.add_argument("--axis-direction", type=float, nargs=3, default=(0, 1, 0),
                    help="measured axis direction; default camera Y is provisional")
     p.add_argument("--angle-sign", type=int, choices=(-1, 1), default=1,
@@ -185,9 +184,6 @@ def main(argv=None):
     p.add_argument("--voxel-mm", type=float, default=1.0)
     args = p.parse_args(argv)
     axis_path = args.axis_calibration
-    if axis_path is None and args.axis_point_mm is None and args.angle_sign == 1 and \
-       tuple(args.axis_direction) == (0, 1, 0):
-        axis_path = DEFAULT_AXIS_CALIBRATION
     if axis_path and (args.axis_point_mm is not None or args.angle_sign != 1 or
                       tuple(args.axis_direction) != (0, 1, 0)):
         p.error("--axis-calibration supplies the axis and angle sign; omit --axis-point-mm and --angle-sign")

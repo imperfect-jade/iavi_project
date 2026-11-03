@@ -7,7 +7,7 @@ import json
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
-from fuse_views import DEFAULT_AXIS_CALIBRATION, main, read_ply, rotate_about_axis, voxel_average, load_axis_calibration, crop_cylinder, transform_axis, validate_rigid_transform, validate_stereo_compatibility
+from fuse_views import main, read_ply, rotate_about_axis, voxel_average, load_axis_calibration, crop_cylinder, transform_axis, validate_rigid_transform, validate_stereo_compatibility
 from reconstruct_view import write_ply
 
 
@@ -117,9 +117,15 @@ class FuseViewsTests(unittest.TestCase):
         keep = crop_cylinder(points, np.zeros(3), np.array([0, 1, 0]), 60, (-20, 110))
         np.testing.assert_array_equal(keep, [True, True, False, False])
 
-    def test_default_axis_path_is_the_calibration_directory(self):
-        self.assertEqual(DEFAULT_AXIS_CALIBRATION,
-            Path(__file__).resolve().parents[1] / "calibration/turntable_axis/axis_cube_01/axis_calibration.json")
+    def test_manual_fusion_requires_explicit_axis_calibration(self):
+        from contextlib import redirect_stderr
+        from io import StringIO
+
+        with tempfile.TemporaryDirectory() as tmp:
+            errors = StringIO()
+            with redirect_stderr(errors), self.assertRaises(SystemExit):
+                main(["--session-root", tmp])
+            self.assertIn("Manual-axis fusion requires --bounds-mm", errors.getvalue())
 
     def test_axis_calibration_uses_measured_angles_and_original_left_frame(self):
         import json
