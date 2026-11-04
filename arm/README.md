@@ -1,51 +1,33 @@
-# 机械臂两位姿串口控制
+# 机械臂与静止参考板 `arm/`
 
-当前 `system/scan_session.py` 每个视角直接从静止 ChArUco 板求相机位姿，并以板为共同坐标系；扫描与融合无需预先标定机械臂两位姿。
+[English](README.en.md) · [实验指导](../实验指导.md)
 
-`arm.py` 通过 Jibot1 控制板的 USB 串口发送六舵机组合命令，切换已试过的“上”和“下”两个相机姿态。不会修改固件或 Zide 动作组。两组目标取自本次实机测试；下姿态原始文本中的 `##004` 和最后缺失的 `!` 已按协议修正。
 
-## 准备
+机械臂携带双目组件，使用两个经过测试的预设位姿：命令行使用 `upper` 表示上位姿、`lower` 表示下位姿；扫描清单中的 `arm_pose_id` 则分别为 0、1。静止 ChArUco 板在扫描过程中提供每视角相机相对参考坐标系的位姿，不能随转盘旋转。
 
-1. 机械臂使用配套外部电源，USB 接电脑；当前机械臂端口为 **COM7**。转盘使用另一串口，勿混用。
-2. 关闭 Zide 及其他占用 COM7 的程序。安装依赖：`python -m pip install pyserial`。
-3. 首次发送前确认相机、支架和线缆在上、下姿态间的完整运动路径无干涉。下姿态 002 号舵机曾有保持抖动，须现场观察。
+## 文件
 
-在 `D:\vscode\visual information\project` 目录执行：
+| 文件 | 作用 |
+| --- | --- |
+| `arm.py` | 通过串口发送机械臂预设位姿命令，可列出、试算、连接和读取控制器反馈 |
+| `generate_charuco_board.py` | 生成固定板打印图及几何配置 |
+| `fixed_board.py` | 检测 ChArUco 角点、估计板到相机位姿并计算位姿差 |
+| `capture_fixed_board.py` | 在上下位姿重复拍摄固定板，保存原图、角点图与清单 |
+| `targets/charuco_7x5_10mm_7mm_config.json` | 固定板尺寸、字典和角点定义；须与实际打印尺寸一致 |
+| `targets/*.png`, `targets/*.pdf` | 固定板打印素材 |
+| `tests/` | 控制命令和固定板几何测试 |
+
+## 使用示例
+
+在项目根目录执行，先通过 `--dry-run` 检查命令，再接实际串口：
 
 ```powershell
 python arm\arm.py --list
 python arm\arm.py --pose upper --dry-run
-python arm\arm.py --pose lower --dry-run
-python arm\arm.py --port COM7 --pose upper --readback
+python arm\arm.py --port COM7 --pose upper
 python arm\arm.py --port COM7 --pose lower --readback
+python arm\generate_charuco_board.py
+python arm\capture_fixed_board.py --session-id board_check_01 --port COM7 --repeats 3
 ```
 
-持续调姿可只打开一次串口：
-
-```powershell
-python arm\arm.py --port COM7 --readback
-```
-
-出现 `pose>` 后输入 `upper`、`lower` 或 `q`。程序只接受这两个已试姿态，不接收任意 PWM 值。每次发送六路组合指令，等待 2.5 秒；`--readback` 再逐一发送 `#000PRAD!` 至 `#005PRAD!` 并显示返回值。无回复时显示 `no reply`。
-
-串口写入和舵机读回都**不能证明双目相机的准确位姿**。正式结构光采集前仍需等待振动消失，并用固定标记的定位图确认相机位姿。若出现碰撞、持续抖动、异响或拉线，停止运行并检查机构；不要用读取到的舵机位置替代光学定位。
-
-### 串口连接时出现预设动作组
-
-厂家提供的出厂源码在启动时会执行控制板闪存里的“开机命令”；如果这个命令设置为动作组，主控板复位就可能启动抓取。原驱动打开串口时使用 pySerial 默认的 DTR/RTS 状态，某些 Arduino 串口板会因此复位。现在驱动会**在打开 COM7 前**将 DTR/RTS 设为非激活，降低这种情况的发生概率；具体 USB 串口芯片或驱动仍可能在打开瞬间产生脉冲，因此无法保证绝不复位。
-
-先在机械臂运动范围清空障碍物，然后仅测试连接：
-
-```powershell
-python arm\arm.py --port COM7 --connect-only
-```
-
-此命令不会发送任何舵机位姿或动作组指令。若仍出现抓取、开机蜂鸣或突然复位，应到 Zide 检查并清除控制板中保存的**开机动作/开机命令**，然后复测；这属于控制板持久配置，Python 脚本没有修改它。若仅在手柄工作或曾启动动作组后出现，关闭手柄并确认当前动作组已结束再测试。厂家源码中位姿 `#...P...T...!` 不会取消正在执行的动作组，后续动作组步骤可能覆盖刚发的位姿。不要在机械臂带相机、靠近标定板时带载尝试不熟悉的动作组。
-
-## 固定 ChArUco 板
-
-[图案](targets/charuco_7x5_10mm_7mm_85x65mm.png)、[A4 打印版](targets/charuco_7x5_10mm_7mm_A4_print.pdf) 和 [配置](targets/charuco_7x5_10mm_7mm_config.json) 使用 10 mm 方格、7 mm 标记。打印时使用 100% 原尺寸，并将纸张平贴在硬质平板上。
-
-把固定板放在转台外侧，确保它不会随转台或机械臂移动，且在转轴标定与物体扫描期间保持同一位置。上下姿态的左右相机都应清晰看到板；避免遮挡、反光和过曝。`system/scan_session.py` 在每个扫描视角拍摄固定板并求出该次相机位姿；`turntable/calibrate_axis.py` 在转轴采集图中同时标定固定板与转轴。无需单独运行机械臂两位姿标定。
-
-`capture_fixed_board.py` 可选用于检查上下姿态的板可见性和机械臂回位，但其照片不参与当前重建流水线。
+`capture_fixed_board.py` 默认读取 `targets/` 中的板配置，可用 `--board` 指定其他配置；`--left-serial`、`--right-serial`、`--exposure-us` 和 `--min-corners` 可调整采集条件。原始与检测结果默认存于 `raw/arm_fixed_board/<session-id>/`，准确路径以该命令 `--help` 的 `--output-root` 默认值为准。串口发送与等待不能单独证明机械臂实际到位；以固定板检测结果检查位姿稳定性。运行测试：`python -m pytest arm/tests -q`。
