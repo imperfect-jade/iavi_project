@@ -202,7 +202,9 @@ def finish_session(args, session_root: Path, processed_root: Path,
             session_root, sources, calibrations[1], args.fusion_axis_images, args.board,
             args.output, args.processed_output, radius_mm=args.fusion_radius_mm,
             height_mm=tuple(args.fusion_height_mm), voxel_mm=args.fusion_voxel_mm,
-            exclude_view_ids=set(args.fusion_exclude_view or ()))
+            exclude_view_ids=set(args.fusion_exclude_view or ()),
+            table_height_axis_mm=getattr(args, "fusion_table_height_axis_mm", None),
+            clean_green_background=not getattr(args, "no_green_filter", False))
         return 0
     except Exception as exc:
         print(f"[ERROR] Automatic fusion: {exc}", flush=True)
@@ -283,6 +285,10 @@ def parser():
     p.add_argument("--fusion-height-mm", type=float, nargs=2, default=(-95.0, 110.0),
                    metavar=("MIN", "MAX"))
     p.add_argument("--fusion-voxel-mm", type=float, default=1.0)
+    p.add_argument("--fusion-table-height-axis-mm", type=float,
+                   help="manual turntable-top coordinate; omit to use the axis target's measured bottom")
+    p.add_argument("--no-green-filter", action="store_true",
+                   help="keep the original unfiltered fusion output")
     p.add_argument("--fusion-exclude-view", type=int, choices=range(24), action="append",
                    metavar="VIEW_ID", help="exclude a suspect view ID; may be repeated")
     p.add_argument("--left-serial", default="40031431")
@@ -328,6 +334,10 @@ def main(argv=None) -> int:
     if not args.no_fusion and (args.fusion_radius_mm <= 0 or args.fusion_voxel_mm <= 0 or
                                args.fusion_height_mm[0] >= args.fusion_height_mm[1]):
         raise ValueError("Invalid fusion radius, height or voxel size")
+    if args.fusion_table_height_axis_mm is not None and (
+            not np.isfinite(args.fusion_table_height_axis_mm) or
+            (not args.no_fusion and args.fusion_table_height_axis_mm >= args.fusion_height_mm[1])):
+        raise ValueError("Fusion tabletop height must be finite and below the fusion upper height")
     if not args.no_fusion:
         if args.fusion_axis_images is None:
             raise ValueError("Automatic fusion requires --fusion-axis-images from a joint "

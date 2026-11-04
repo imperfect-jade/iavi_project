@@ -8,7 +8,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from calibrate_axis import (ROOT, axis_in_board_frame, default_output_path,
-                            fit_axis_from_poses, fit_stationary_board)
+                            fit_axis_from_poses, fit_stationary_board,
+                            optional_turntable_top, turntable_top_from_target_poses)
 
 
 class AxisFitTests(unittest.TestCase):
@@ -60,6 +61,37 @@ class AxisFitTests(unittest.TestCase):
         self.assertGreater(np.dot(result['axis_direction'], axis), 0.999)
         self.assertLess(np.linalg.norm(np.cross(result['axis_point_mm'] - center, axis)), 0.01)
         self.assertLess(result['point_rms_mm'], 0.01)
+
+    def test_target_bottom_gives_table_height_on_calibrated_axis(self):
+        poses = [(angle, np.eye(3), np.array([20.0, 0.0, -180.0 + error]))
+                 for angle, error in zip(range(0, 360, 30),
+                                         [0, 0.2, -0.1, 0.1] * 3)]
+        result = turntable_top_from_target_poses(
+            poses, {"axis_point_mm": np.zeros(3),
+                    "axis_direction": np.array([0.0, 0.0, 1.0])})
+        self.assertAlmostEqual(result["turntable_top_axis_mm"], -180.0, delta=0.2)
+        self.assertLess(result["turntable_top_height_spread_mm"], 1)
+
+    def test_target_bottom_height_rejects_inconsistent_mount(self):
+        poses = [(angle, np.eye(3), np.array([20.0, 0.0, -180.0 + angle / 10]))
+                 for angle in range(0, 360, 30)]
+        with self.assertRaisesRegex(ValueError, "bottom height"):
+            turntable_top_from_target_poses(
+                poses, {"axis_point_mm": np.zeros(3),
+                        "axis_direction": np.array([0.0, 0.0, 1.0])})
+
+    def test_reversed_axis_does_not_produce_unsafe_table_height(self):
+        poses = [(angle, np.eye(3), np.array([20.0, 0.0, -180.0]))
+                 for angle in range(0, 360, 30)]
+        axis = {"axis_point_mm": np.zeros(3),
+                "axis_direction": np.array([0.0, 0.0, -1.0])}
+        with self.assertRaisesRegex(ValueError, "up direction"):
+            turntable_top_from_target_poses(poses, axis)
+        result = optional_turntable_top({"frame": "cuboid_center_at_bottom; z_up"}, poses, axis)
+        self.assertIn("up direction", result["turntable_top_error"])
+
+    def test_old_axis_target_remains_usable_with_manual_height(self):
+        self.assertEqual(optional_turntable_top({"frame": "target_center"}, [], {}), {})
 
 
 if __name__ == '__main__':

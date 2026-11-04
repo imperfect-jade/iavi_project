@@ -16,6 +16,14 @@ from scan_session import angles_for_range, pending_views, reconstruct_session, r
 
 
 class SessionPlanTests(unittest.TestCase):
+    def test_manual_table_above_fusion_top_fails_before_capture(self):
+        with self.assertRaisesRegex(ValueError, "tabletop height"):
+            scan_session.main([
+                "--start-angle", "0", "--end-angle", "30",
+                "--object-id", "preflight_height", "--session-id", "session_01",
+                "--fusion-axis-images", "missing_axis_capture",
+                "--fusion-table-height-axis-mm", "120"])
+
     def test_pose_calibrations_require_fresh_upper_fit_from_current_lower(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

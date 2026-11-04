@@ -84,9 +84,9 @@ def test_capture_step_rejects_stale_processed_repeat_before_motion(tmp_path):
 
 
 def test_return_to_zero_uses_long_settle_after_other_angles():
-    assert turntable_settle_seconds(12, 11, 2.5, 12.0) == 12.0
-    assert turntable_settle_seconds(0, None, 2.5, 12.0) == 2.5
-    assert turntable_settle_seconds(6, 0, 2.5, 12.0) == 2.5
+    assert turntable_settle_seconds(12, 11, 6.0, 12.0) == 12.0
+    assert turntable_settle_seconds(0, None, 6.0, 12.0) == 6.0
+    assert turntable_settle_seconds(6, 0, 6.0, 12.0) == 6.0
 
 
 def test_localization_rejects_nonfinite_pose_quality(monkeypatch):

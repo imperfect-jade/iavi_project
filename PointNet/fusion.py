@@ -17,6 +17,8 @@ def _axis_data(path: Path, board: dict | None = None) -> dict:
         raise ValueError("axis must use fixed ChArUco board coordinates in mm")
     if board is not None and data.get("fixed_board") != board:
         raise ValueError("axis fixed board differs from scan board")
+    if "up direction" in data.get("turntable_top_error", ""):
+        raise ValueError("axis direction points below the turntable; check calibration and turntable rotation")
     rms = data.get("point_rms_mm")
     shift = data.get("return_to_zero", {}).get("left_corner_shift_rms_px")
     if (not isinstance(rms, (int, float)) or not isinstance(shift, (int, float)) or
@@ -44,7 +46,9 @@ def calibrate_session_axis(axis_images, lower_stereo, board_config, output,
 
 
 def fuse_selected(repeats, axis_calibration, camera_poses, raw_root,
-                  processed_root, output, crop=None, *, fuse=None) -> Path:
+                  processed_root, output, crop=None, *, fuse=None,
+                  clean_green_background=False, table_height_axis_mm=None,
+                  clean_radius_mm=None, cleaner=None) -> Path:
     repeats = [Path(path).resolve() for path in repeats]
     if len(repeats) < 2:
         raise ValueError("fusion requires at least two repeats")
@@ -73,20 +77,29 @@ def fuse_selected(repeats, axis_calibration, camera_poses, raw_root,
     voxel = float(crop.get("voxel_mm", 1.0))
     if radius <= 0 or voxel <= 0 or len(height) != 2 or height[0] >= height[1]:
         raise ValueError("invalid fusion crop")
+    fusion_output = output / "unfiltered" if clean_green_background else output
     argv = ["--repeat-root", *map(str, repeats), "--raw-root", str(Path(raw_root).resolve()),
             "--processed-root", str(Path(processed_root).resolve()),
-            "--output", str(output), "--camera-poses", str(camera_poses),
+            "--output", str(fusion_output), "--camera-poses", str(camera_poses),
             "--axis-calibration", str(axis_calibration), "--axis-already-in-reference",
             "--radius-mm", str(radius), "--height-mm", *map(str, height),
             "--voxel-mm", str(voxel)]
     if fuse(argv) != 0:
         raise RuntimeError("visited view fusion failed")
-    report_path = output / "fusion.json"
-    if not report_path.is_file() or not (output / "fused.ply").is_file():
+    report_path = fusion_output / "fusion.json"
+    if not report_path.is_file() or not (fusion_output / "fused.ply").is_file():
         raise RuntimeError("fusion did not produce report and cloud")
     report = json.loads(report_path.read_text(encoding="utf-8"))
     selected = [Path(path).resolve() for path in report.get("selected_repeats", [])]
     if (selected != repeats or report.get("coordinate_frame") != "turntable_zero_calibrated" or
             report.get("unit") != "mm" or report.get("fused_points", 0) < 1):
         raise RuntimeError("fusion report does not match visited repeat selection")
+    if clean_green_background:
+        if cleaner is None:
+            from clean_green import clean_aligned_fusion as cleaner
+        cleaned = cleaner(fusion_output, output, radius_mm=clean_radius_mm,
+                          max_radius_mm=radius,
+                          table_height_axis_mm=table_height_axis_mm)
+        if cleaned.get("selected_repeats") != report["selected_repeats"] or cleaned.get("fused_points", 0) < 1:
+            raise RuntimeError("green filter report does not match selected views")
     return output

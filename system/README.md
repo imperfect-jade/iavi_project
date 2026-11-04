@@ -39,8 +39,8 @@ python system\scan_session.py --port COM6 --arm-port COM7 --start-angle 0 --end-
 
 单独调用 `fuse_views.py` 时须用 `--axis-calibration` 指定对应扫描会话的转轴 JSON；固定板坐标系中的轴还需加 `--axis-already-in-reference`。手动融合不预选某次历史轴标定。自动融合会把本次重算的轴文件显式传给融合程序。
 
-默认物体裁剪为轴周围半径 65 mm、高度 -95～110 mm，体素 1 mm；可用 `--fusion-radius-mm`、`--fusion-height-mm MIN MAX`、`--fusion-voxel-mm` 按物体尺寸调整。默认融合所有选定视角；疑似异常视角可用 `--fusion-exclude-view 11` 排除，多次传入可排除多个视角。`--resume` 时可以改变这些融合参数而不重新拍摄。确需只重建、不融合时使用 `--no-fusion`。
+默认以轴周围半径 65 mm、高度上限 110 mm、体素 1 mm 融合；转轴标定时，立方体底面须直接接触转台顶面，程序用其 12 个角度的位姿测量顶面高度，并将融合下限放宽至顶面以下 5 mm。绿布清理随后估计更紧的半径，并按同一顶面高度去除台面以下点；放在转台上的垫块会保留。估计记录在 `processed/fused/<物体>/<会话>/table_height_estimate.json`；立方体底面高度不一致时，自动高度会报错，可配合本次坐标系的手动高度使用。若转轴方向与立方体向上方向相反，应先检查转台旋向及标定，不能仅靠手动高度修正。可用 `--fusion-table-height-axis-mm` 手动指定本次坐标，不能沿用其他转轴会话的数值。`--fusion-radius-mm`、`--fusion-height-mm MIN MAX`、`--fusion-voxel-mm` 可按物体尺寸调整。默认融合所有选定视角；疑似异常视角可用 `--fusion-exclude-view 11` 排除，多次传入可排除多个视角。`--resume` 时可以改变这些融合参数而不重新拍摄。确需只重建、不融合时使用 `--no-fusion`。
 
-最终点云在 `processed/fused/<object-id>/<session-id>/all_views_axis_calibrated/fused.ply`，同时保存 `fusion.json`、逐视角 `aligned/*.ply`、会话专属 `fusion_calibration/axis_calibration.json` 和 `fusion_status.json`。默认只选每个视角最新的完整 repeat；融合失败会以非零退出码报告并保留原始照片和已完成的重建。裁剪范围和轴质量门限需按实际物体核对，自动结果是点云而非封闭网格。
+最终点云在 `processed/fused/<object-id>/<session-id>/all_views_axis_calibrated/fused.ply`，同时保存 `fusion.json`、逐视角 `aligned/*.ply`、会话专属 `fusion_calibration/axis_calibration.json` 和 `fusion_status.json`。自动融合默认调用 `code/clean_green.py` 去除绿色背景布，未过滤的完整融合保存在 `all_views_axis_calibrated/unfiltered/`。程序从亮色非绿色主体点自动估计轴向裁剪半径；候选点不足时退回 `--fusion-radius-mm` 的宽松半径。用 `--no-green-filter` 可关闭去绿布处理。默认只选每个视角最新的完整 repeat；融合失败会以非零退出码报告并保留原始照片和已完成的重建。裁剪范围和轴质量门限需按实际物体核对，自动结果是点云而非封闭网格。
 
 相机位姿和转轴均以静止固定板为参考系。扫描与转轴标定期间，固定板相对转台的位置必须一致。

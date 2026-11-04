@@ -7,7 +7,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scan_pipeline import (completed_session, live_input_fingerprint,
-                           prepare_scan_plan, run_session, validate_live_settings)
+                           legacy_completed_session, prepare_scan_plan,
+                           requested_fusion_crop, resolve_table_height, run_session,
+                           validate_live_settings)
 
 
 def _services(tmp_path, actions, score=-1.0, fail=None):
@@ -153,6 +155,8 @@ def test_live_preflight_rejects_nonfinite_localization_and_invalid_crop():
         validate_live_settings(SimpleNamespace(**{**valid, "max_board_rms_px": float("nan")}))
     with pytest.raises(ValueError, match="fusion"):
         validate_live_settings(SimpleNamespace(**{**valid, "fusion_radius_mm": -1}))
+    with pytest.raises(ValueError, match="table height"):
+        validate_live_settings(SimpleNamespace(**{**valid, "table_height_axis_mm": 120}))
 
 
 def test_live_fingerprint_changes_with_fusion_crop(tmp_path):
@@ -167,3 +171,84 @@ def test_live_fingerprint_changes_with_fusion_crop(tmp_path):
                                             "voxel_mm": 1}, -95, tmp_path / "processed")
     assert first != second
     assert first["fusion_crop"]["height_mm"] == [-95, 110]
+
+
+def test_auto_height_fingerprint_has_no_stale_manual_height(tmp_path):
+    paths = {}
+    for name in ("stereo_upper", "stereo_lower", "board", "axis", "axis_manifest",
+                 "model_config", "model_checkpoint"):
+        paths[name] = tmp_path / name
+        paths[name].write_bytes(name.encode())
+    result = live_input_fingerprint(paths, {"radius_mm": 65, "height_mm": (-95, 110),
+                                            "voxel_mm": 1}, None, tmp_path / "processed")
+    assert result["table_height_axis_mm"] is None
+
+
+def test_auto_height_fingerprint_tracks_wider_user_fusion_crop(tmp_path):
+    paths = {}
+    for name in ("stereo_upper", "stereo_lower", "board", "axis", "axis_manifest",
+                 "model_config", "model_checkpoint"):
+        paths[name] = tmp_path / name
+        paths[name].write_bytes(name.encode())
+    normal = live_input_fingerprint(paths, requested_fusion_crop(65, (-95, 110), 1),
+                                    None, tmp_path / "processed")
+    wider = live_input_fingerprint(paths, requested_fusion_crop(65, (-250, 110), 1),
+                                   None, tmp_path / "processed")
+    assert normal != wider
+    assert wider["fusion_crop"]["height_mm"] == [-250, 110]
+
+
+def test_auto_table_height_is_saved_and_rechecked_for_resume(tmp_path):
+    saved = tmp_path / "table_height_estimate.json"
+    calls = []
+    report = {"table_height_axis_mm": -179.6, "method": "axis_target_bottom",
+              "axis_calibration_sha256": "same"}
+    def estimate(*args, **kwargs):
+        calls.append((args, kwargs))
+        return dict(report)
+    settings = (None, saved, tmp_path / "axis.json")
+    assert resolve_table_height(*settings, estimator=estimate) == -179.6
+    assert json.loads(saved.read_text(encoding="utf-8")) == report
+    assert resolve_table_height(*settings, estimator=estimate) == -179.6
+    assert len(calls) == 2
+    report["axis_calibration_sha256"] = "changed"
+    with pytest.raises(ValueError, match="saved table height"):
+        resolve_table_height(*settings, estimator=estimate)
+
+
+def test_cancelled_preview_does_not_save_height_and_fresh_retry_replaces_orphan(tmp_path):
+    saved = tmp_path / "table_height_estimate.json"
+    current = {"table_height_axis_mm": -180.0, "axis_calibration_sha256": "new"}
+    estimate = lambda _: dict(current)
+    assert resolve_table_height(None, saved, tmp_path / "axis.json", estimator=estimate,
+                                persist=False, check_existing=False) == -180.0
+    assert not saved.exists()
+    saved.write_text(json.dumps({"table_height_axis_mm": -100.0,
+                                 "axis_calibration_sha256": "cancelled"}), encoding="utf-8")
+    assert resolve_table_height(None, saved, tmp_path / "axis.json", estimator=estimate,
+                                check_existing=False) == -180.0
+    assert json.loads(saved.read_text(encoding="utf-8")) == current
+
+
+def test_completed_legacy_session_can_be_read_without_new_green_filter_fingerprint(tmp_path):
+    raw = tmp_path / "raw" / "item" / "run"
+    processed = tmp_path / "processed"
+    crop = requested_fusion_crop(65, (-95, 110), 1)
+    saved = {"config": {"session_root": str(raw.resolve()), "max_scans": 10,
+                        "available": list(range(24)), "score_stop_enabled": False,
+                        "score_threshold": None,
+                        "source_fingerprint": {"table_height_axis_mm": -101.09,
+                                               "fusion_crop": crop,
+                                               "processed_root": str(processed.resolve())}},
+             "phase": "complete", "visited": [0, 6], "stop_reason": "budget",
+             "final_fusion_dir": "done"}
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps(saved), encoding="utf-8")
+    args = SimpleNamespace(table_height_axis_mm=-101.09, fusion_radius_mm=65,
+                           fusion_height_mm=(-95, 110), fusion_voxel_mm=1,
+                           processed_root=processed, max_scans=10, available=list(range(24)),
+                           score_stop_enabled=False, score_threshold=None)
+    assert legacy_completed_session(state, True, args, raw) == saved
+    args.table_height_axis_mm = -180
+    with pytest.raises(ValueError, match="legacy completed"):
+        legacy_completed_session(state, True, args, raw)

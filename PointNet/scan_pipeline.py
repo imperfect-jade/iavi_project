@@ -153,14 +153,44 @@ def validate_live_settings(args) -> None:
             not np.isfinite(args.fusion_voxel_mm) or args.fusion_voxel_mm <= 0 or
             len(height) != 2 or not np.isfinite(height).all() or height[0] >= height[1]):
         raise ValueError("invalid fusion crop or voxel size")
+    manual_height = getattr(args, "table_height_axis_mm", None)
+    if manual_height is not None and (not np.isfinite(manual_height) or
+                                      manual_height >= height[1]):
+        raise ValueError("manual table height must be below fusion upper crop")
 
 
 def live_input_fingerprint(paths: dict[str, Path], crop: dict,
-                           table_height_axis_mm: float, processed_root: Path) -> dict:
+                           table_height_axis_mm: float | None, processed_root: Path) -> dict:
     return {**{f"{name}_sha256": _sha256(path) for name, path in paths.items()},
             "fusion_crop": json.loads(json.dumps(crop)),
-            "table_height_axis_mm": float(table_height_axis_mm),
+            "table_height_axis_mm": (None if table_height_axis_mm is None
+                                     else float(table_height_axis_mm)),
             "processed_root": str(Path(processed_root).resolve())}
+
+
+def requested_fusion_crop(radius_mm: float, height_mm, voxel_mm: float) -> dict:
+    """Keep every requested crop bound in the resume fingerprint."""
+    return {"radius_mm": float(radius_mm), "height_mm": list(map(float, height_mm)),
+            "voxel_mm": float(voxel_mm)}
+
+
+def resolve_table_height(manual_height, report_path, axis_calibration,
+                         estimator=None, *, persist=True, check_existing=True) -> float:
+    """Use a manual height or persist and verify this session's auto estimate."""
+    if manual_height is not None:
+        return float(manual_height)
+    if estimator is None:
+        sys.path.insert(0, str(ROOT / "code"))
+        from estimate_table_height import table_height_from_axis as estimator
+    report_path = Path(report_path)
+    current = estimator(axis_calibration)
+    if check_existing and report_path.is_file():
+        saved = json.loads(report_path.read_text(encoding="utf-8"))
+        if saved != current:
+            raise ValueError("saved table height differs from current axis calibration")
+    if persist and (not report_path.is_file() or not check_existing):
+        _write_json(report_path, current)
+    return float(current["table_height_axis_mm"])
 
 
 def prepare_scan_plan(plan_path: Path, plan: dict, resume: bool):
@@ -185,6 +215,27 @@ def completed_session(state_path: Path, resume: bool) -> dict | None:
     return state if state.get("phase") == "complete" else None
 
 
+def legacy_completed_session(state_path: Path, resume: bool, args, raw_session: Path) -> dict | None:
+    """Read an archived result without applying today's processing to it."""
+    previous = completed_session(state_path, resume)
+    if previous is None or "green_filter" in previous.get("config", {}).get("source_fingerprint", {}):
+        return None
+    saved = previous["config"]
+    source = saved["source_fingerprint"]
+    if (source.get("table_height_axis_mm") != args.table_height_axis_mm or
+            source.get("fusion_crop") != requested_fusion_crop(
+                args.fusion_radius_mm, args.fusion_height_mm, args.fusion_voxel_mm) or
+            source.get("processed_root") != str(args.processed_root.resolve()) or
+            saved.get("session_root") != str(raw_session.resolve()) or
+            saved.get("max_scans") != args.max_scans or
+            saved.get("available") != args.available or
+            saved.get("score_stop_enabled") != args.score_stop_enabled or
+            saved.get("score_threshold") != (
+                args.score_threshold if args.score_stop_enabled else None)):
+        raise ValueError("legacy completed session settings differ from saved session")
+    return previous
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--object-id", required=True)
@@ -192,7 +243,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--port", default="COM6")
     p.add_argument("--arm-port", default="COM7")
     p.add_argument("--axis-images", type=Path, required=True)
-    p.add_argument("--table-height-axis-mm", type=float, required=True)
+    p.add_argument("--table-height-axis-mm", type=float,
+                   help="manual turntable-top coordinate; omit to use the axis target's measured bottom")
     p.add_argument("--stereo-upper", type=Path, default=ROOT / "calibration/stereo_pose_upper/stereo_calibration.json")
     p.add_argument("--stereo-lower", type=Path, default=ROOT / "calibration/stereo_pose_lower/stereo_calibration.json")
     p.add_argument("--board", type=Path, default=ROOT / "arm/targets/charuco_7x5_10mm_7mm_config.json")
@@ -204,6 +256,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--available", type=int, nargs="+", default=list(range(24)))
     p.add_argument("--score-stop-enabled", action="store_true")
     p.add_argument("--score-threshold", type=float)
+    p.add_argument("--use-unfiltered-model-input", action="store_true",
+                   help="use original aligned clouds for PointNet decisions")
     p.add_argument("--repeat-id", type=int, default=1)
     p.add_argument("--resume", action="store_true")
     p.add_argument("--left-serial", default="40031431")
@@ -217,7 +271,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--dot-seed", type=int, default=5)
     p.add_argument("--dot-frames", type=int, default=5)
     p.add_argument("--arm-settle-s", type=float, default=6)
-    p.add_argument("--motion-settle-s", type=float, default=2.5)
+    p.add_argument("--motion-settle-s", type=float, default=6)
     p.add_argument("--return-settle-s", type=float, default=12)
     p.add_argument("--min-board-corners", type=int, default=12)
     p.add_argument("--max-board-rms-px", type=float, default=3)
@@ -242,10 +296,12 @@ def main(argv=None) -> int:
     from arm import open_controller as open_arm_controller
     from turntable import open_controller as open_table_controller
     from fixed_board import board_from_config
+    from estimate_table_height import height_crop_from_table
     import cv2
     if (args.port == args.arm_port or not SAFE.fullmatch(args.object_id) or
             not SAFE.fullmatch(args.session_id) or args.repeat_id < 1 or
-            not np.isfinite(args.table_height_axis_mm) or
+            (args.table_height_axis_mm is not None and
+             not np.isfinite(args.table_height_axis_mm)) or
             not 2 <= args.max_scans <= 24 or len(set(args.available)) != len(args.available) or
             any(not 0 <= a < 24 for a in args.available) or
             not {0, 6}.issubset(args.available) or
@@ -264,6 +320,16 @@ def main(argv=None) -> int:
     raw_session = args.raw_root / args.object_id / args.session_id
     output = args.output_root / args.object_id / args.session_id
     state_path = output / "state.json"
+    previous = legacy_completed_session(state_path, args.resume, args, raw_session)
+    if previous is not None:
+        print(json.dumps({"visited": previous["visited"],
+                          "stop_reason": previous["stop_reason"],
+                          "final_fusion_dir": previous["final_fusion_dir"]}, ensure_ascii=False))
+        return 0
+    if args.resume and state_path.is_file():
+        saved_state = json.loads(state_path.read_text(encoding="utf-8"))
+        if "green_filter" not in saved_state.get("config", {}).get("source_fingerprint", {}):
+            raise ValueError("unfinished legacy session uses different fusion processing; start a new session")
     if state_path.exists() and not args.resume:
         raise ValueError("existing session requires --resume or a new ID")
     if raw_session.exists() and not args.resume:
@@ -273,14 +339,23 @@ def main(argv=None) -> int:
         _axis_data(axis_output, board_config)
     else:
         calibrate_session_axis(args.axis_images, calibrations[1], args.board, axis_output)
-    crop = {"radius_mm": args.fusion_radius_mm,
-            "height_mm": list(args.fusion_height_mm), "voxel_mm": args.fusion_voxel_mm}
+    table_height_path = output / "table_height_estimate.json"
+    resolved_table_height = resolve_table_height(
+        args.table_height_axis_mm, table_height_path, axis_output,
+        persist=False, check_existing=args.resume)
+    height_crop_from_table(args.fusion_height_mm, resolved_table_height)
+    crop = requested_fusion_crop(args.fusion_radius_mm, args.fusion_height_mm,
+                                 args.fusion_voxel_mm)
     source_fingerprint = live_input_fingerprint(
         {"stereo_upper": calibrations[0], "stereo_lower": calibrations[1],
          "board": args.board, "axis": axis_output,
          "axis_manifest": args.axis_images / "capture_manifest.json",
          "model_config": args.config, "model_checkpoint": checkpoint},
         crop, args.table_height_axis_mm, args.processed_root)
+    source_fingerprint["green_filter"] = {"version": 1, "enabled": True,
+                                          "radius_mode": "auto_from_initial_views",
+                                          "min_object_height_mm": 3.0,
+                                          "model_input": "unfiltered" if args.use_unfiltered_model_input else "cleaned"}
     plan = {"protocol": "dense_dots_v3", "reference_frame": "fixed_ChArUco_board",
             "board": board_config, "initial_views": [0, 6],
             "stereo_by_pose": {str(k): str(v.with_suffix('.json')) for k, v in calibrations.items()},
@@ -329,6 +404,8 @@ def main(argv=None) -> int:
             if key == 32:
                 break
         commit_scan_plan()
+        resolve_table_height(args.table_height_axis_mm, table_height_path, axis_output,
+                             check_existing=args.resume)
         show_pattern(Pattern("black", np.zeros_like(patterns[0].image)), display)
         cv2.waitKey(args.settle_ms)
         context = vars(args).copy()
@@ -349,20 +426,39 @@ def main(argv=None) -> int:
                 return _selected_repeat(raw_session, args.processed_root, action)
             except ValueError:
                 return None
+        filter_radius_path = output / "green_filter_radius.json"
         def fuse(repeats, destination):
-            return fuse_selected(repeats, axis_output, raw_session / "camera_poses.json",
-                                 args.raw_root, args.processed_root, destination, crop)
+            effective_crop = dict(crop)
+            effective_crop["height_mm"] = list(height_crop_from_table(
+                args.fusion_height_mm, resolved_table_height))
+            saved = (json.loads(filter_radius_path.read_text(encoding="utf-8"))
+                     if filter_radius_path.is_file() else None)
+            result = fuse_selected(repeats, axis_output, raw_session / "camera_poses.json",
+                                   args.raw_root, args.processed_root, destination, effective_crop,
+                                   clean_green_background=True,
+                                   table_height_axis_mm=resolved_table_height,
+                                   clean_radius_mm=saved["radius_mm"] if saved else None)
+            if saved is None:
+                cleaned = json.loads((result / "fusion.json").read_text(encoding="utf-8"))
+                _write_json(filter_radius_path, {
+                    "radius_mm": cleaned["green_filter"]["radius_mm"],
+                    "estimate": cleaned["green_filter"]["radius_estimate"],
+                    "source_views": [0, 6]})
+            return result
         frame_path = output / "object_frame.json"
         def predict(fusion_dir, visited, step_dir):
             frame = json.loads(frame_path.read_text(encoding="utf-8")) if frame_path.is_file() else None
+            model_fusion_dir = (fusion_dir / "unfiltered" if args.use_unfiltered_model_input
+                                else fusion_dir)
             points, frame = prepare_observation(
-                fusion_dir, raw_session, visited, table_height_axis_mm=args.table_height_axis_mm,
+                model_fusion_dir, raw_session, visited, table_height_axis_mm=resolved_table_height,
                 frame=frame)
             _write_json(frame_path, frame)
             step_dir.mkdir(parents=True, exist_ok=True)
             cloud_path = step_dir / "observed.npy"
             np.save(cloud_path, points)
             result = predict_scores(args.config, cloud_path, visited, args.available)
+            result["input_fusion_dir"] = str(model_fusion_dir.resolve())
             _write_json(step_dir / "prediction.json", result)
             return result
         def home():

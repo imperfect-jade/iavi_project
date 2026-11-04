@@ -227,6 +227,42 @@ def fit_axis_from_poses(poses):
             "angles": actual}
 
 
+def turntable_top_from_target_poses(poses, fitted_axis, max_spread_mm=5.0):
+    """Project the bottom-centred cuboid origins onto the calibrated axis."""
+    point = np.asarray(fitted_axis["axis_point_mm"], np.float64)
+    direction = np.asarray(fitted_axis["axis_direction"], np.float64).copy()
+    if (point.shape != (3,) or direction.shape != (3,) or
+            not np.isfinite(point).all() or not np.isfinite(direction).all() or
+            np.linalg.norm(direction) < 1e-8):
+        raise ValueError("invalid axis for target bottom height")
+    direction /= np.linalg.norm(direction)
+    for _, rotation, _ in poses:
+        rotation = np.asarray(rotation, np.float64)
+        if (rotation.shape != (3, 3) or not np.isfinite(rotation).all() or
+                np.dot(rotation[:, 2], direction) < 0.95):
+            raise ValueError("target up direction disagrees with fitted turntable axis")
+    heights = np.asarray([np.dot(np.asarray(t, np.float64) - point, direction)
+                          for _, _, t in poses], np.float64)
+    if len(heights) < 8 or not np.isfinite(heights).all():
+        raise ValueError("target bottom height requires eight finite poses")
+    spread = float(np.ptp(heights))
+    if spread > max_spread_mm:
+        raise ValueError(f"target bottom height varies by {spread:.1f} mm across rotation")
+    return {"turntable_top_axis_mm": float(np.median(heights)),
+            "turntable_top_height_spread_mm": spread,
+            "turntable_top_source": "bottom_centred_axis_cuboid_on_turntable"}
+
+
+def optional_turntable_top(config, poses, fitted_axis):
+    """Keep axis calibration usable when the optional height check fails."""
+    if not str(config.get("frame", "")).startswith("cuboid_center_at_bottom"):
+        return {}
+    try:
+        return turntable_top_from_target_poses(poses, fitted_axis)
+    except ValueError as exc:
+        return {"turntable_top_error": str(exc)}
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--images", type=Path, required=True, help="capture_axis.py session directory")
@@ -307,6 +343,7 @@ def main(argv=None):
     closure_rot = float(np.rad2deg(np.arccos(np.clip((np.trace(closure_R) - 1) / 2, -1, 1))))
     closure_mm = float(np.linalg.norm(t_return - t_zero))
     fitted = fit_axis_from_poses(poses)
+    table_top = optional_turntable_top(config, poses, fitted)
     T_left_from_board, fixed_board_fit = fit_stationary_board(
         fixed_board_images, fixed_board, stereo[0], stereo[1],
         min_corners=args.min_fixed_board_corners,
@@ -322,6 +359,7 @@ def main(argv=None):
               "axis_point_original_left_camera_mm": fitted["axis_point_mm"].tolist(),
               "axis_direction_original_left_camera": fitted["axis_direction"].tolist(),
               "point_rms_mm": fitted["point_rms_mm"],
+              **table_top,
               "angles": fitted["angles"], "observations": observations,
               "return_to_zero": {"markers": return_count,
                                  "triangulation_fit_rms_mm": return_fit,
