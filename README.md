@@ -1,6 +1,6 @@
 # 双目结构光三维重建与主动视角规划
 
-[English](README.en.md) · [实验指导（中文）](实验指导.md) · [Experiment guide (English)](实验指导.en.md)
+[English](README.en.md) · [实验指导（中文）](实验指导.md) · [Experiment guide (English)](instruction.md)
 
 本仓库实现一套实验性桌面物体扫描系统：固定投影仪投射随机密集点阵，两台随机械臂移动的相机采集图像；双目重建得到单视角点云，利用静止 ChArUco 板和转台轴标定将不同视角对齐。另有基于 PointNet 风格收益预测的下一视角选择、ModelNet 几何仿真、训练和离线回放。实验目标、器材、完整流程和命令见[实验指导](实验指导.md)。
 
